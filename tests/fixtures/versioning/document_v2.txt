@@ -1,0 +1,12 @@
+This is version 2 of the test document.
+Updated for testing S3 object versioning functionality.
+
+Version History:
+- v1.0: Initial release
+- v2.0: Added new section
+
+Content: Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+
+New Section Added in v2:
+This section was added in version 2 to demonstrate version differences.

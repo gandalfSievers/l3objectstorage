@@ -1,0 +1,605 @@
+//! Object Lock integration tests using AWS SDK
+//!
+//! Run with: cargo test --test object_lock_tests -- --ignored
+//! Requires: Server running on localhost:9000
+
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::primitives::DateTime as AwsDateTime;
+use aws_sdk_s3::types::{
+    DefaultRetention, ObjectLockConfiguration, ObjectLockEnabled, ObjectLockLegalHold,
+    ObjectLockLegalHoldStatus, ObjectLockRetention, ObjectLockRetentionMode, ObjectLockRule,
+};
+use aws_sdk_s3::Client;
+use bytes::Bytes;
+
+async fn create_s3_client() -> Client {
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .endpoint_url("http://localhost:9000")
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(aws_credential_types::Credentials::new(
+            "localadmin",
+            "localadmin",
+            None,
+            None,
+            "test",
+        ))
+        .load()
+        .await;
+
+    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+        .force_path_style(true)
+        .build();
+
+    Client::from_conf(s3_config)
+}
+
+// =============================================================================
+// Object Lock Configuration Tests (Bucket Level)
+// =============================================================================
+
+/// Test Put and Get Object Lock Configuration
+#[tokio::test]
+#[ignore]
+async fn test_put_get_object_lock_configuration() {
+    let client = create_s3_client().await;
+    let bucket = "object-lock-config-test";
+
+    // Create bucket with object lock enabled
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put Object Lock Configuration with default retention
+    let lock_config = ObjectLockConfiguration::builder()
+        .object_lock_enabled(ObjectLockEnabled::Enabled)
+        .rule(
+            ObjectLockRule::builder()
+                .default_retention(
+                    DefaultRetention::builder()
+                        .mode(ObjectLockRetentionMode::Governance)
+                        .days(30)
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    client
+        .put_object_lock_configuration()
+        .bucket(bucket)
+        .object_lock_configuration(lock_config)
+        .send()
+        .await
+        .expect("Failed to put object lock configuration");
+
+    // Get Object Lock Configuration
+    let response = client
+        .get_object_lock_configuration()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get object lock configuration");
+
+    let config = response.object_lock_configuration().unwrap();
+    assert_eq!(
+        config.object_lock_enabled(),
+        Some(&ObjectLockEnabled::Enabled)
+    );
+
+    let rule = config.rule().unwrap();
+    let retention = rule.default_retention().unwrap();
+    assert_eq!(retention.mode(), Some(&ObjectLockRetentionMode::Governance));
+    assert_eq!(retention.days(), Some(30));
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test Object Lock Configuration with COMPLIANCE mode
+#[tokio::test]
+#[ignore]
+async fn test_object_lock_configuration_compliance_mode() {
+    let client = create_s3_client().await;
+    let bucket = "lock-compliance-test";
+
+    // Create bucket with object lock enabled
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put Object Lock Configuration with COMPLIANCE retention
+    let lock_config = ObjectLockConfiguration::builder()
+        .object_lock_enabled(ObjectLockEnabled::Enabled)
+        .rule(
+            ObjectLockRule::builder()
+                .default_retention(
+                    DefaultRetention::builder()
+                        .mode(ObjectLockRetentionMode::Compliance)
+                        .years(1)
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+
+    client
+        .put_object_lock_configuration()
+        .bucket(bucket)
+        .object_lock_configuration(lock_config)
+        .send()
+        .await
+        .expect("Failed to put object lock configuration");
+
+    // Get and verify
+    let response = client
+        .get_object_lock_configuration()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get object lock configuration");
+
+    let config = response.object_lock_configuration().unwrap();
+    let rule = config.rule().unwrap();
+    let retention = rule.default_retention().unwrap();
+    assert_eq!(retention.mode(), Some(&ObjectLockRetentionMode::Compliance));
+    assert_eq!(retention.years(), Some(1));
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Object Legal Hold Tests
+// =============================================================================
+
+/// Test Put and Get Object Legal Hold
+#[tokio::test]
+#[ignore]
+async fn test_put_get_object_legal_hold() {
+    let client = create_s3_client().await;
+    let bucket = "legal-hold-test";
+
+    // Create bucket with object lock enabled
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put an object
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-object")
+        .body(Bytes::from("test data").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Put Legal Hold ON
+    let legal_hold = ObjectLockLegalHold::builder()
+        .status(ObjectLockLegalHoldStatus::On)
+        .build();
+
+    client
+        .put_object_legal_hold()
+        .bucket(bucket)
+        .key("test-object")
+        .legal_hold(legal_hold)
+        .send()
+        .await
+        .expect("Failed to put legal hold");
+
+    // Get Legal Hold
+    let response = client
+        .get_object_legal_hold()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .expect("Failed to get legal hold");
+
+    let hold = response.legal_hold().unwrap();
+    assert_eq!(hold.status(), Some(&ObjectLockLegalHoldStatus::On));
+
+    // Put Legal Hold OFF
+    let legal_hold_off = ObjectLockLegalHold::builder()
+        .status(ObjectLockLegalHoldStatus::Off)
+        .build();
+
+    client
+        .put_object_legal_hold()
+        .bucket(bucket)
+        .key("test-object")
+        .legal_hold(legal_hold_off)
+        .send()
+        .await
+        .expect("Failed to remove legal hold");
+
+    // Verify it's off
+    let response = client
+        .get_object_legal_hold()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .expect("Failed to get legal hold");
+
+    let hold = response.legal_hold().unwrap();
+    assert_eq!(hold.status(), Some(&ObjectLockLegalHoldStatus::Off));
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Object Retention Tests
+// =============================================================================
+
+/// Test Put and Get Object Retention
+#[tokio::test]
+#[ignore]
+async fn test_put_get_object_retention() {
+    let client = create_s3_client().await;
+    let bucket = "retention-test";
+
+    // Create bucket with object lock enabled
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put an object
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-object")
+        .body(Bytes::from("test data").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Calculate retention date (30 days from now)
+    let retain_until = chrono::Utc::now() + chrono::Duration::days(30);
+    let retain_until_dt = AwsDateTime::from_millis(retain_until.timestamp_millis());
+
+    // Put Retention with GOVERNANCE mode
+    let retention = ObjectLockRetention::builder()
+        .mode(ObjectLockRetentionMode::Governance)
+        .retain_until_date(retain_until_dt)
+        .build();
+
+    client
+        .put_object_retention()
+        .bucket(bucket)
+        .key("test-object")
+        .retention(retention)
+        .send()
+        .await
+        .expect("Failed to put retention");
+
+    // Get Retention
+    let response = client
+        .get_object_retention()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .expect("Failed to get retention");
+
+    let ret = response.retention().unwrap();
+    assert_eq!(ret.mode(), Some(&ObjectLockRetentionMode::Governance));
+    assert!(ret.retain_until_date().is_some());
+
+    // Cleanup (need bypass-governance-retention to delete)
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-object")
+        .bypass_governance_retention(true)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test Object Retention with COMPLIANCE mode
+#[tokio::test]
+#[ignore]
+async fn test_object_retention_compliance_mode() {
+    let client = create_s3_client().await;
+    let bucket = "retention-compliance-test";
+
+    // Create bucket with object lock enabled
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put an object
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-object")
+        .body(Bytes::from("test data").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Calculate retention date (very short for test - 1 second from now)
+    // In production, compliance mode cannot be shortened
+    let retain_until = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let retain_until_dt = AwsDateTime::from_millis(retain_until.timestamp_millis());
+
+    // Put Retention with COMPLIANCE mode
+    let retention = ObjectLockRetention::builder()
+        .mode(ObjectLockRetentionMode::Compliance)
+        .retain_until_date(retain_until_dt)
+        .build();
+
+    client
+        .put_object_retention()
+        .bucket(bucket)
+        .key("test-object")
+        .retention(retention)
+        .send()
+        .await
+        .expect("Failed to put retention");
+
+    // Get Retention
+    let response = client
+        .get_object_retention()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .expect("Failed to get retention");
+
+    let ret = response.retention().unwrap();
+    assert_eq!(ret.mode(), Some(&ObjectLockRetentionMode::Compliance));
+
+    // Wait for retention to expire (for cleanup)
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Object Lock with Versioning Tests
+// =============================================================================
+
+/// Test Object Lock with Versioned Objects
+#[tokio::test]
+#[ignore]
+async fn test_object_lock_with_versioning() {
+    let client = create_s3_client().await;
+    let bucket = "lock-versioning-test";
+
+    // Create bucket with object lock enabled (versioning is automatically enabled)
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put multiple versions of an object
+    let put_result1 = client
+        .put_object()
+        .bucket(bucket)
+        .key("versioned-object")
+        .body(Bytes::from("version 1").into())
+        .send()
+        .await
+        .expect("Failed to put v1");
+
+    let version_id1 = put_result1.version_id().unwrap().to_string();
+
+    let put_result2 = client
+        .put_object()
+        .bucket(bucket)
+        .key("versioned-object")
+        .body(Bytes::from("version 2").into())
+        .send()
+        .await
+        .expect("Failed to put v2");
+
+    let version_id2 = put_result2.version_id().unwrap().to_string();
+
+    // Put legal hold on version 1 only
+    let legal_hold = ObjectLockLegalHold::builder()
+        .status(ObjectLockLegalHoldStatus::On)
+        .build();
+
+    client
+        .put_object_legal_hold()
+        .bucket(bucket)
+        .key("versioned-object")
+        .version_id(&version_id1)
+        .legal_hold(legal_hold)
+        .send()
+        .await
+        .expect("Failed to put legal hold on v1");
+
+    // Get legal hold for v1 - should be ON
+    let response = client
+        .get_object_legal_hold()
+        .bucket(bucket)
+        .key("versioned-object")
+        .version_id(&version_id1)
+        .send()
+        .await
+        .expect("Failed to get legal hold for v1");
+
+    assert_eq!(
+        response.legal_hold().unwrap().status(),
+        Some(&ObjectLockLegalHoldStatus::On)
+    );
+
+    // Get legal hold for v2 - should be OFF (default)
+    let response_v2 = client
+        .get_object_legal_hold()
+        .bucket(bucket)
+        .key("versioned-object")
+        .version_id(&version_id2)
+        .send()
+        .await;
+
+    // v2 should have no legal hold or OFF
+    if let Ok(resp) = response_v2 {
+        if let Some(hold) = resp.legal_hold() {
+            assert_eq!(hold.status(), Some(&ObjectLockLegalHoldStatus::Off));
+        }
+    }
+
+    // Cleanup - remove legal hold first
+    let legal_hold_off = ObjectLockLegalHold::builder()
+        .status(ObjectLockLegalHoldStatus::Off)
+        .build();
+
+    client
+        .put_object_legal_hold()
+        .bucket(bucket)
+        .key("versioned-object")
+        .version_id(&version_id1)
+        .legal_hold(legal_hold_off)
+        .send()
+        .await
+        .ok();
+
+    // Delete versions
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("versioned-object")
+        .version_id(&version_id1)
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("versioned-object")
+        .version_id(&version_id2)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test that object with legal hold ON cannot be deleted
+#[tokio::test]
+#[ignore]
+async fn test_legal_hold_prevents_deletion() {
+    let client = create_s3_client().await;
+    let bucket = "legal-hold-delete-test";
+
+    // Create bucket with object lock enabled
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .object_lock_enabled_for_bucket(true)
+        .send()
+        .await;
+
+    // Put an object
+    let put_result = client
+        .put_object()
+        .bucket(bucket)
+        .key("protected-object")
+        .body(Bytes::from("protected data").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    let version_id = put_result.version_id().map(|s| s.to_string());
+
+    // Put Legal Hold ON
+    let legal_hold = ObjectLockLegalHold::builder()
+        .status(ObjectLockLegalHoldStatus::On)
+        .build();
+
+    client
+        .put_object_legal_hold()
+        .bucket(bucket)
+        .key("protected-object")
+        .legal_hold(legal_hold)
+        .send()
+        .await
+        .expect("Failed to put legal hold");
+
+    // Try to delete - should fail
+    let delete_result = client
+        .delete_object()
+        .bucket(bucket)
+        .key("protected-object")
+        .send()
+        .await;
+
+    // Deletion should be denied (AccessDenied error expected)
+    assert!(
+        delete_result.is_err(),
+        "Delete should fail when legal hold is ON"
+    );
+
+    // Cleanup - remove legal hold first
+    let legal_hold_off = ObjectLockLegalHold::builder()
+        .status(ObjectLockLegalHoldStatus::Off)
+        .build();
+
+    client
+        .put_object_legal_hold()
+        .bucket(bucket)
+        .key("protected-object")
+        .legal_hold(legal_hold_off)
+        .send()
+        .await
+        .ok();
+
+    // Now delete should work
+    if let Some(vid) = version_id {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key("protected-object")
+            .version_id(&vid)
+            .send()
+            .await
+            .ok();
+    } else {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key("protected-object")
+            .send()
+            .await
+            .ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}

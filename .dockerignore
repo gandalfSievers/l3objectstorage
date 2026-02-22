@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+*.md
+tests/
+benches/
+.env*
+data/
+.idea/
+.vscode/

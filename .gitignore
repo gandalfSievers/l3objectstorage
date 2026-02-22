@@ -1,0 +1,24 @@
+# Build artifacts
+/target
+
+# Data directory (S3 storage)
+/data
+
+# Environment files (may contain credentials)
+.env
+.env.*
+*.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Credentials
+credentials.json
+access_keys.json

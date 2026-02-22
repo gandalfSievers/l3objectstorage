@@ -1,0 +1,4739 @@
+//! External integration tests using AWS SDK
+//!
+//! Run with: cargo test --test aws_sdk_tests -- --ignored
+//! Requires: Server running on localhost:9000
+
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::types::{
+    BucketCannedAcl, CompletedMultipartUpload, CompletedPart, CorsConfiguration, CorsRule,
+    DefaultRetention, Delete, ObjectIdentifier, ObjectLockConfiguration, ObjectLockEnabled,
+    ObjectLockLegalHold, ObjectLockLegalHoldStatus, ObjectLockRetention, ObjectLockRetentionMode,
+    ObjectLockRule, Permission, Tag, Tagging,
+};
+use aws_sdk_s3::Client;
+use bytes::Bytes;
+
+async fn create_s3_client() -> Client {
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .endpoint_url("http://localhost:9000")
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(aws_credential_types::Credentials::new(
+            "localadmin",
+            "localadmin",
+            None,
+            None,
+            "test",
+        ))
+        .load()
+        .await;
+
+    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+        .force_path_style(true)
+        .build();
+
+    Client::from_conf(s3_config)
+}
+
+#[tokio::test]
+#[ignore] // Run manually with --ignored flag
+async fn test_bucket_operations() {
+    let client = create_s3_client().await;
+
+    // Create bucket
+    client
+        .create_bucket()
+        .bucket("sdk-test-bucket")
+        .send()
+        .await
+        .expect("Failed to create bucket");
+
+    // List buckets
+    let buckets = client
+        .list_buckets()
+        .send()
+        .await
+        .expect("Failed to list buckets");
+
+    assert!(buckets
+        .buckets()
+        .iter()
+        .any(|b| b.name() == Some("sdk-test-bucket")));
+
+    // Delete bucket
+    client
+        .delete_bucket()
+        .bucket("sdk-test-bucket")
+        .send()
+        .await
+        .expect("Failed to delete bucket");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_object_operations() {
+    let client = create_s3_client().await;
+
+    // Setup: create bucket
+    let _ = client
+        .create_bucket()
+        .bucket("sdk-object-test")
+        .send()
+        .await;
+
+    // Put object
+    client
+        .put_object()
+        .bucket("sdk-object-test")
+        .key("test-key")
+        .body(Bytes::from("hello world").into())
+        .content_type("text/plain")
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Get object
+    let response = client
+        .get_object()
+        .bucket("sdk-object-test")
+        .key("test-key")
+        .send()
+        .await
+        .expect("Failed to get object");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("hello world"));
+
+    // Head object
+    let head = client
+        .head_object()
+        .bucket("sdk-object-test")
+        .key("test-key")
+        .send()
+        .await
+        .expect("Failed to head object");
+
+    assert_eq!(head.content_length(), Some(11));
+
+    // Delete object
+    client
+        .delete_object()
+        .bucket("sdk-object-test")
+        .key("test-key")
+        .send()
+        .await
+        .expect("Failed to delete object");
+
+    // Cleanup
+    let _ = client
+        .delete_bucket()
+        .bucket("sdk-object-test")
+        .send()
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_objects() {
+    let client = create_s3_client().await;
+
+    let _ = client
+        .create_bucket()
+        .bucket("sdk-list-test")
+        .send()
+        .await;
+
+    // Create multiple objects
+    for i in 0..5 {
+        client
+            .put_object()
+            .bucket("sdk-list-test")
+            .key(format!("prefix/key-{}", i))
+            .body(Bytes::from("data").into())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List with prefix
+    let response = client
+        .list_objects_v2()
+        .bucket("sdk-list-test")
+        .prefix("prefix/")
+        .send()
+        .await
+        .expect("Failed to list objects");
+
+    assert_eq!(response.key_count(), Some(5));
+
+    // Cleanup
+    for i in 0..5 {
+        client
+            .delete_object()
+            .bucket("sdk-list-test")
+            .key(format!("prefix/key-{}", i))
+            .send()
+            .await
+            .unwrap();
+    }
+    let _ = client
+        .delete_bucket()
+        .bucket("sdk-list-test")
+        .send()
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_copy_object() {
+    let client = create_s3_client().await;
+
+    // Setup
+    let _ = client
+        .create_bucket()
+        .bucket("sdk-copy-test")
+        .send()
+        .await;
+
+    // Put source object
+    client
+        .put_object()
+        .bucket("sdk-copy-test")
+        .key("source-key")
+        .body(Bytes::from("copy this data").into())
+        .send()
+        .await
+        .expect("Failed to put source object");
+
+    // Copy object
+    client
+        .copy_object()
+        .bucket("sdk-copy-test")
+        .key("dest-key")
+        .copy_source("sdk-copy-test/source-key")
+        .send()
+        .await
+        .expect("Failed to copy object");
+
+    // Verify copy
+    let response = client
+        .get_object()
+        .bucket("sdk-copy-test")
+        .key("dest-key")
+        .send()
+        .await
+        .expect("Failed to get copied object");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("copy this data"));
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket("sdk-copy-test")
+        .key("source-key")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_object()
+        .bucket("sdk-copy-test")
+        .key("dest-key")
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .delete_bucket()
+        .bucket("sdk-copy-test")
+        .send()
+        .await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_delete_objects_batch() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-delete-batch-test";
+
+    // Setup: create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create 5 objects
+    for i in 0..5 {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(format!("key-{}", i))
+            .body(Bytes::from("data").into())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Delete 3 of them in one batch request
+    let objects_to_delete: Vec<ObjectIdentifier> = (0..3)
+        .map(|i| {
+            ObjectIdentifier::builder()
+                .key(format!("key-{}", i))
+                .build()
+                .unwrap()
+        })
+        .collect();
+
+    let delete = Delete::builder()
+        .set_objects(Some(objects_to_delete))
+        .build()
+        .unwrap();
+
+    let response = client
+        .delete_objects()
+        .bucket(bucket)
+        .delete(delete)
+        .send()
+        .await
+        .expect("Failed to delete objects");
+
+    // Verify 3 objects were deleted
+    assert_eq!(response.deleted().len(), 3);
+
+    // Verify remaining objects (key-3 and key-4)
+    let list = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(list.key_count(), Some(2));
+
+    // Cleanup remaining objects
+    for i in 3..5 {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(format!("key-{}", i))
+            .send()
+            .await
+            .unwrap();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_delete_objects_with_nonexistent() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-delete-nonexistent-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create one object
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("existing-key")
+        .body(Bytes::from("data").into())
+        .send()
+        .await
+        .unwrap();
+
+    // Delete both existing and non-existing (S3 treats non-existent as success)
+    let objects_to_delete = vec![
+        ObjectIdentifier::builder()
+            .key("existing-key")
+            .build()
+            .unwrap(),
+        ObjectIdentifier::builder()
+            .key("nonexistent-key")
+            .build()
+            .unwrap(),
+    ];
+
+    let delete = Delete::builder()
+        .set_objects(Some(objects_to_delete))
+        .build()
+        .unwrap();
+
+    let response = client
+        .delete_objects()
+        .bucket(bucket)
+        .delete(delete)
+        .send()
+        .await
+        .expect("Failed to delete objects");
+
+    // S3 treats non-existent keys as successful deletes
+    assert_eq!(response.deleted().len(), 2);
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_create_multipart_upload() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-multipart-create-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Initiate multipart upload
+    let response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("large-file.bin")
+        .content_type("application/octet-stream")
+        .send()
+        .await
+        .expect("Failed to create multipart upload");
+
+    assert_eq!(response.bucket(), Some(bucket));
+    assert_eq!(response.key(), Some("large-file.bin"));
+    assert!(response.upload_id().is_some());
+    let upload_id = response.upload_id().unwrap();
+    assert!(!upload_id.is_empty());
+
+    // Cleanup: abort the upload
+    client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key("large-file.bin")
+        .upload_id(upload_id)
+        .send()
+        .await
+        .ok();
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_multipart_upload_complete() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-multipart-complete-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create multipart upload
+    let create_response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("complete-file")
+        .send()
+        .await
+        .unwrap();
+
+    let upload_id = create_response.upload_id().unwrap();
+
+    // Upload 2 parts
+    let mut completed_parts = Vec::new();
+    for i in 1..=2 {
+        let data = Bytes::from(format!("Part {} data content here", i));
+        let response = client
+            .upload_part()
+            .bucket(bucket)
+            .key("complete-file")
+            .upload_id(upload_id)
+            .part_number(i)
+            .body(data.into())
+            .send()
+            .await
+            .expect("Failed to upload part");
+
+        completed_parts.push(
+            CompletedPart::builder()
+                .part_number(i)
+                .e_tag(response.e_tag().unwrap())
+                .build(),
+        );
+    }
+
+    // Complete multipart upload
+    let completed_upload = CompletedMultipartUpload::builder()
+        .set_parts(Some(completed_parts))
+        .build();
+
+    let complete_response = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("complete-file")
+        .upload_id(upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+        .expect("Failed to complete multipart upload");
+
+    assert_eq!(complete_response.bucket(), Some(bucket));
+    assert_eq!(complete_response.key(), Some("complete-file"));
+    assert!(complete_response.e_tag().is_some());
+
+    // Verify the object exists and has correct content
+    let get_response = client
+        .get_object()
+        .bucket(bucket)
+        .key("complete-file")
+        .send()
+        .await
+        .expect("Failed to get completed object");
+
+    let body = get_response.body.collect().await.unwrap().into_bytes();
+    assert!(body.starts_with(b"Part 1"));
+    assert!(String::from_utf8_lossy(&body).contains("Part 2"));
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("complete-file")
+        .send()
+        .await
+        .unwrap();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_parts() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-list-parts-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create multipart upload
+    let create_response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("list-parts-file")
+        .send()
+        .await
+        .unwrap();
+
+    let upload_id = create_response.upload_id().unwrap();
+
+    // Upload 3 parts
+    for i in 1..=3 {
+        let data = Bytes::from(vec![i as u8; 1024]);
+        client
+            .upload_part()
+            .bucket(bucket)
+            .key("list-parts-file")
+            .upload_id(upload_id)
+            .part_number(i)
+            .body(data.into())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List parts
+    let list_response = client
+        .list_parts()
+        .bucket(bucket)
+        .key("list-parts-file")
+        .upload_id(upload_id)
+        .send()
+        .await
+        .expect("Failed to list parts");
+
+    assert_eq!(list_response.parts().len(), 3);
+
+    for (i, part) in list_response.parts().iter().enumerate() {
+        assert_eq!(part.part_number(), Some((i + 1) as i32));
+        assert_eq!(part.size(), Some(1024));
+    }
+
+    // Cleanup
+    client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key("list-parts-file")
+        .upload_id(upload_id)
+        .send()
+        .await
+        .ok();
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_abort_multipart_upload() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-abort-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create multipart upload
+    let create_response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("abort-file")
+        .send()
+        .await
+        .unwrap();
+
+    let upload_id = create_response.upload_id().unwrap();
+
+    // Upload a part
+    client
+        .upload_part()
+        .bucket(bucket)
+        .key("abort-file")
+        .upload_id(upload_id)
+        .part_number(1)
+        .body(Bytes::from("part data").into())
+        .send()
+        .await
+        .unwrap();
+
+    // Abort the upload
+    client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key("abort-file")
+        .upload_id(upload_id)
+        .send()
+        .await
+        .expect("Failed to abort multipart upload");
+
+    // Verify the upload no longer exists (list parts should fail)
+    let list_result = client
+        .list_parts()
+        .bucket(bucket)
+        .key("abort-file")
+        .upload_id(upload_id)
+        .send()
+        .await;
+
+    assert!(list_result.is_err());
+
+    // Verify no object was created
+    let get_result = client
+        .get_object()
+        .bucket(bucket)
+        .key("abort-file")
+        .send()
+        .await;
+
+    assert!(get_result.is_err());
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_multipart_uploads() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-list-uploads-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create multiple multipart uploads
+    let mut upload_ids = Vec::new();
+    for i in 0..3 {
+        let response = client
+            .create_multipart_upload()
+            .bucket(bucket)
+            .key(format!("file-{}", i))
+            .send()
+            .await
+            .unwrap();
+        upload_ids.push((format!("file-{}", i), response.upload_id().unwrap().to_string()));
+    }
+
+    // List multipart uploads
+    let list_response = client
+        .list_multipart_uploads()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list multipart uploads");
+
+    assert_eq!(list_response.uploads().len(), 3);
+
+    for upload in list_response.uploads() {
+        assert!(upload.key().is_some());
+        assert!(upload.upload_id().is_some());
+        assert!(upload.initiated().is_some());
+    }
+
+    // Cleanup: abort all uploads
+    for (key, upload_id) in &upload_ids {
+        client
+            .abort_multipart_upload()
+            .bucket(bucket)
+            .key(key)
+            .upload_id(upload_id)
+            .send()
+            .await
+            .ok();
+    }
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_tagging() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-tagging-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put tags
+    let tag1 = Tag::builder()
+        .key("env")
+        .value("dev")
+        .build()
+        .unwrap();
+    let tag2 = Tag::builder()
+        .key("team")
+        .value("platform")
+        .build()
+        .unwrap();
+    let tagging = Tagging::builder()
+        .tag_set(tag1)
+        .tag_set(tag2)
+        .build()
+        .unwrap();
+
+    client
+        .put_bucket_tagging()
+        .bucket(bucket)
+        .tagging(tagging)
+        .send()
+        .await
+        .expect("Failed to put bucket tagging");
+
+    // Get tags and verify
+    let result = client
+        .get_bucket_tagging()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket tagging");
+
+    assert_eq!(result.tag_set().len(), 2);
+
+    // Verify tag values
+    let tags: Vec<_> = result.tag_set().iter().collect();
+    let env_tag = tags.iter().find(|t| t.key() == "env");
+    let team_tag = tags.iter().find(|t| t.key() == "team");
+    assert!(env_tag.is_some());
+    assert!(team_tag.is_some());
+    assert_eq!(env_tag.unwrap().value(), "dev");
+    assert_eq!(team_tag.unwrap().value(), "platform");
+
+    // Delete tags
+    client
+        .delete_bucket_tagging()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to delete bucket tagging");
+
+    // Verify tags deleted (should error with NoSuchTagSet)
+    let result = client.get_bucket_tagging().bucket(bucket).send().await;
+    assert!(result.is_err());
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_object_tagging() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-object-tagging-test";
+
+    // Setup: create bucket and object
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("tagged-object")
+        .body(Bytes::from("test content").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Put object tags
+    let tag1 = Tag::builder()
+        .key("environment")
+        .value("testing")
+        .build()
+        .unwrap();
+    let tag2 = Tag::builder()
+        .key("project")
+        .value("local-s3")
+        .build()
+        .unwrap();
+    let tagging = Tagging::builder()
+        .tag_set(tag1)
+        .tag_set(tag2)
+        .build()
+        .unwrap();
+
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("tagged-object")
+        .tagging(tagging)
+        .send()
+        .await
+        .expect("Failed to put object tagging");
+
+    // Get tags and verify
+    let result = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("tagged-object")
+        .send()
+        .await
+        .expect("Failed to get object tagging");
+
+    assert_eq!(result.tag_set().len(), 2);
+
+    // Verify tag values
+    let tags: Vec<_> = result.tag_set().iter().collect();
+    let env_tag = tags.iter().find(|t| t.key() == "environment");
+    let project_tag = tags.iter().find(|t| t.key() == "project");
+    assert!(env_tag.is_some());
+    assert!(project_tag.is_some());
+    assert_eq!(env_tag.unwrap().value(), "testing");
+    assert_eq!(project_tag.unwrap().value(), "local-s3");
+
+    // Delete tags
+    client
+        .delete_object_tagging()
+        .bucket(bucket)
+        .key("tagged-object")
+        .send()
+        .await
+        .expect("Failed to delete object tagging");
+
+    // Verify tags deleted (should error with NoSuchTagSet or return empty)
+    let result = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("tagged-object")
+        .send()
+        .await;
+
+    // After deletion, either returns empty tag set or error
+    if let Ok(response) = result {
+        assert!(response.tag_set().is_empty(), "Tags should be empty after deletion");
+    }
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("tagged-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Create a client with invalid credentials for testing auth rejection
+async fn create_s3_client_with_invalid_creds() -> Client {
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .endpoint_url("http://localhost:9000")
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(aws_credential_types::Credentials::new(
+            "invalidkey",
+            "invalidsecret",
+            None,
+            None,
+            "test",
+        ))
+        .load()
+        .await;
+
+    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+        .force_path_style(true)
+        .build();
+
+    Client::from_conf(s3_config)
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_auth_valid_signature() {
+    // This test verifies that valid credentials work correctly
+    // Uses the default localadmin/localadmin credentials
+    let client = create_s3_client().await;
+
+    // Simple operation that should succeed with valid credentials
+    let result = client.list_buckets().send().await;
+    assert!(result.is_ok(), "Valid credentials should be accepted");
+}
+
+/// Tests that invalid credentials are rejected when server has auth enabled.
+///
+/// **IMPORTANT**: This test MUST be run with auth enabled on the server:
+///   `LOCAL_S3_REQUIRE_AUTH=true cargo run`
+///
+/// If this test passes when auth is disabled, it indicates a false positive.
+/// Run `test_anonymous_access_when_auth_disabled` instead for that scenario.
+#[tokio::test]
+#[ignore]
+async fn test_auth_rejects_invalid_credentials() {
+    let client = create_s3_client_with_invalid_creds().await;
+
+    // This MUST fail with an authentication error when server has auth enabled
+    let result = client.list_buckets().send().await;
+
+    // We explicitly expect an error - if this succeeds, either:
+    // 1. The server doesn't have auth enabled (test is running in wrong mode)
+    // 2. The server has a bug allowing invalid credentials
+    assert!(
+        result.is_err(),
+        "Invalid credentials MUST be rejected. If this fails, ensure server is running with LOCAL_S3_REQUIRE_AUTH=true"
+    );
+
+    let err = result.err().unwrap();
+    let err_str = format!("{:?}", err);
+    assert!(
+        err_str.contains("SignatureDoesNotMatch")
+            || err_str.contains("InvalidAccessKeyId")
+            || err_str.contains("AccessDenied")
+            || err_str.contains("403"),
+        "Expected auth error (SignatureDoesNotMatch, InvalidAccessKeyId, or AccessDenied), got: {}",
+        err_str
+    );
+}
+
+/// Tests that anonymous access works when server auth is disabled.
+///
+/// **IMPORTANT**: This test MUST be run with auth disabled on the server:
+///   `cargo run` (without LOCAL_S3_REQUIRE_AUTH)
+///
+/// This verifies the server correctly allows unauthenticated access when configured to do so.
+#[tokio::test]
+#[ignore]
+async fn test_anonymous_access_when_auth_disabled() {
+    let client = create_s3_client_with_invalid_creds().await;
+
+    // When auth is disabled, even invalid/no credentials should work
+    let result = client.list_buckets().send().await;
+
+    // We explicitly expect success - if this fails, either:
+    // 1. The server has auth enabled (test is running in wrong mode)
+    // 2. The server has a bug rejecting valid anonymous requests
+    assert!(
+        result.is_ok(),
+        "Anonymous access should be allowed when auth is disabled. If this fails, ensure server is running WITHOUT LOCAL_S3_REQUIRE_AUTH"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_cors() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-cors-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put CORS configuration
+    let cors_rule = CorsRule::builder()
+        .allowed_methods("GET")
+        .allowed_methods("PUT")
+        .allowed_origins("*")
+        .allowed_headers("*")
+        .max_age_seconds(3000)
+        .build()
+        .unwrap();
+
+    let cors_config = CorsConfiguration::builder()
+        .cors_rules(cors_rule)
+        .build()
+        .unwrap();
+
+    client
+        .put_bucket_cors()
+        .bucket(bucket)
+        .cors_configuration(cors_config)
+        .send()
+        .await
+        .expect("Failed to put CORS");
+
+    // Get CORS configuration
+    let result = client
+        .get_bucket_cors()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get CORS");
+
+    assert_eq!(result.cors_rules().len(), 1);
+
+    let rule = &result.cors_rules()[0];
+    assert!(rule.allowed_methods().contains(&"GET".to_string()));
+    assert!(rule.allowed_methods().contains(&"PUT".to_string()));
+    assert!(rule.allowed_origins().contains(&"*".to_string()));
+    assert_eq!(rule.max_age_seconds(), Some(3000));
+
+    // Delete CORS
+    client
+        .delete_bucket_cors()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to delete CORS");
+
+    // Verify CORS is deleted (should error)
+    let result = client
+        .get_bucket_cors()
+        .bucket(bucket)
+        .send()
+        .await;
+    assert!(result.is_err());
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_policy() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-policy-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Get policy should fail initially (no policy set)
+    let result = client.get_bucket_policy().bucket(bucket).send().await;
+    assert!(result.is_err(), "Should fail when no policy exists");
+
+    // Put a simple bucket policy
+    let policy = r#"{
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "PublicReadGetObject",
+                "Effect": "Allow",
+                "Principal": "*",
+                "Action": "s3:GetObject",
+                "Resource": "arn:aws:s3:::sdk-policy-test/*"
+            }
+        ]
+    }"#;
+
+    client
+        .put_bucket_policy()
+        .bucket(bucket)
+        .policy(policy)
+        .send()
+        .await
+        .expect("Failed to put bucket policy");
+
+    // Get policy and verify
+    let result = client
+        .get_bucket_policy()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket policy");
+
+    let retrieved_policy = result.policy().unwrap();
+    // Verify it's valid JSON and contains expected fields
+    let parsed: serde_json::Value = serde_json::from_str(retrieved_policy)
+        .expect("Policy should be valid JSON");
+    assert_eq!(parsed["Version"], "2012-10-17");
+    assert!(parsed["Statement"].is_array());
+
+    // Delete policy
+    client
+        .delete_bucket_policy()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to delete bucket policy");
+
+    // Verify policy is deleted (get should fail)
+    let result = client.get_bucket_policy().bucket(bucket).send().await;
+    assert!(result.is_err(), "Should fail after policy deleted");
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_versioning() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-versioning-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Get versioning status (should be disabled by default - returns empty/no status)
+    let result = client
+        .get_bucket_versioning()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket versioning");
+
+    // Initially versioning is not set (status is None)
+    assert!(
+        result.status().is_none()
+            || result.status() == Some(&aws_sdk_s3::types::BucketVersioningStatus::Suspended)
+    );
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Verify versioning is enabled
+    let result = client
+        .get_bucket_versioning()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket versioning");
+
+    assert_eq!(
+        result.status(),
+        Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+    );
+
+    // Suspend versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Suspended)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to suspend versioning");
+
+    // Verify versioning is suspended
+    let result = client
+        .get_bucket_versioning()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket versioning");
+
+    assert_eq!(
+        result.status(),
+        Some(&aws_sdk_s3::types::BucketVersioningStatus::Suspended)
+    );
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_acl() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-acl-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Get default ACL - should return owner with FULL_CONTROL
+    let result = client
+        .get_bucket_acl()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket ACL");
+
+    // Verify owner exists
+    let owner = result.owner().expect("ACL should have an owner");
+    assert!(owner.id().is_some(), "Owner should have an ID");
+
+    // Verify default grants (owner has FULL_CONTROL)
+    let grants = result.grants();
+    assert!(!grants.is_empty(), "Should have at least one grant");
+
+    let owner_grant = grants
+        .iter()
+        .find(|g| g.permission() == Some(&Permission::FullControl));
+    assert!(owner_grant.is_some(), "Owner should have FULL_CONTROL");
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_acl_canned() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-acl-canned-test";
+
+    // Create bucket with public-read ACL
+    let _ = client
+        .create_bucket()
+        .bucket(bucket)
+        .acl(BucketCannedAcl::PublicRead)
+        .send()
+        .await;
+
+    // Get ACL and verify public read grant exists
+    let result = client
+        .get_bucket_acl()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket ACL");
+
+    let grants = result.grants();
+
+    // Should have owner FULL_CONTROL and AllUsers READ
+    assert!(
+        grants.len() >= 2,
+        "Should have at least 2 grants for public-read"
+    );
+
+    let has_public_read = grants.iter().any(|g| {
+        g.permission() == Some(&Permission::Read)
+            && g.grantee()
+                .and_then(|grantee| grantee.uri())
+                .map(|uri| uri.contains("AllUsers"))
+                .unwrap_or(false)
+    });
+    assert!(has_public_read, "Should have public READ grant");
+
+    // Put ACL to change it back to private
+    client
+        .put_bucket_acl()
+        .bucket(bucket)
+        .acl(BucketCannedAcl::Private)
+        .send()
+        .await
+        .expect("Failed to put bucket ACL");
+
+    // Verify it's now private (only owner grant)
+    let result = client
+        .get_bucket_acl()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket ACL");
+
+    let grants = result.grants();
+    // Private should only have owner with FULL_CONTROL
+    assert_eq!(grants.len(), 1, "Private ACL should have only 1 grant");
+    assert_eq!(
+        grants[0].permission(),
+        Some(&Permission::FullControl),
+        "Should be FULL_CONTROL"
+    );
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_object_acl_default() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-object-acl-test";
+
+    // Create bucket and object
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-object")
+        .body(Bytes::from("test content").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Get object ACL - should return owner with FULL_CONTROL
+    let result = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .expect("Failed to get object ACL");
+
+    // Verify owner exists
+    let owner = result.owner().expect("ACL should have an owner");
+    assert!(owner.id().is_some(), "Owner should have an ID");
+
+    // Verify default grants (owner has FULL_CONTROL)
+    let grants = result.grants();
+    assert!(!grants.is_empty(), "Should have at least one grant");
+
+    let owner_grant = grants
+        .iter()
+        .find(|g| g.permission() == Some(&Permission::FullControl));
+    assert!(owner_grant.is_some(), "Owner should have FULL_CONTROL");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_object_acl_canned() {
+    use aws_sdk_s3::types::ObjectCannedAcl;
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-object-acl-canned-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put object with public-read ACL
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("public-object")
+        .body(Bytes::from("public content").into())
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .expect("Failed to put object with ACL");
+
+    // Get object ACL and verify public read grant exists
+    let result = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key("public-object")
+        .send()
+        .await
+        .expect("Failed to get object ACL");
+
+    let grants = result.grants();
+
+    // Should have owner FULL_CONTROL and AllUsers READ
+    assert!(
+        grants.len() >= 2,
+        "Should have at least 2 grants for public-read"
+    );
+
+    let has_public_read = grants.iter().any(|g| {
+        g.permission() == Some(&Permission::Read)
+            && g.grantee()
+                .and_then(|grantee| grantee.uri())
+                .map(|uri| uri.contains("AllUsers"))
+                .unwrap_or(false)
+    });
+    assert!(has_public_read, "Should have public READ grant");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("public-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_put_object_acl() {
+    use aws_sdk_s3::types::ObjectCannedAcl;
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-put-object-acl-test";
+
+    // Create bucket and object
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .body(Bytes::from("test content").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Initially should be private (only owner grant)
+    let initial_result = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .send()
+        .await
+        .expect("Failed to get object ACL");
+
+    assert_eq!(
+        initial_result.grants().len(),
+        1,
+        "Private object should have only 1 grant"
+    );
+
+    // Change ACL to public-read
+    client
+        .put_object_acl()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .expect("Failed to put object ACL");
+
+    // Verify ACL changed
+    let result = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .send()
+        .await
+        .expect("Failed to get object ACL");
+
+    let grants = result.grants();
+    assert!(grants.len() >= 2, "Should have at least 2 grants after public-read");
+
+    let has_public_read = grants.iter().any(|g| {
+        g.permission() == Some(&Permission::Read)
+            && g.grantee()
+                .and_then(|grantee| grantee.uri())
+                .map(|uri| uri.contains("AllUsers"))
+                .unwrap_or(false)
+    });
+    assert!(has_public_read, "Should have public READ grant");
+
+    // Change back to private
+    client
+        .put_object_acl()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .acl(ObjectCannedAcl::Private)
+        .send()
+        .await
+        .expect("Failed to put object ACL");
+
+    // Verify it's now private
+    let result = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .send()
+        .await
+        .expect("Failed to get object ACL");
+
+    assert_eq!(
+        result.grants().len(),
+        1,
+        "Private ACL should have only 1 grant"
+    );
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("acl-test-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Object Versioning Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_versioning_put_creates_versions() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-versioning-put-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Put first version
+    let put1 = client
+        .put_object()
+        .bucket(bucket)
+        .key("versioned-key")
+        .body(Bytes::from("version 1").into())
+        .send()
+        .await
+        .expect("Failed to put first version");
+
+    let version1 = put1.version_id().expect("Should return version ID");
+    assert!(!version1.is_empty(), "Version ID should not be empty");
+
+    // Put second version
+    let put2 = client
+        .put_object()
+        .bucket(bucket)
+        .key("versioned-key")
+        .body(Bytes::from("version 2").into())
+        .send()
+        .await
+        .expect("Failed to put second version");
+
+    let version2 = put2.version_id().expect("Should return version ID");
+    assert!(!version2.is_empty(), "Version ID should not be empty");
+    assert_ne!(version1, version2, "Version IDs should be different");
+
+    // Get current (should be version 2)
+    let get_current = client
+        .get_object()
+        .bucket(bucket)
+        .key("versioned-key")
+        .send()
+        .await
+        .expect("Failed to get current version");
+
+    let current_version_id = get_current.version_id().map(|s| s.to_string());
+    let body = get_current.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("version 2"));
+    assert_eq!(current_version_id.as_deref(), Some(version2.as_ref()));
+
+    // Get specific version (version 1)
+    let get_v1 = client
+        .get_object()
+        .bucket(bucket)
+        .key("versioned-key")
+        .version_id(version1)
+        .send()
+        .await
+        .expect("Failed to get specific version");
+
+    let body = get_v1.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("version 1"));
+
+    // Cleanup: delete all versions
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("versioned-key")
+        .version_id(version1)
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("versioned-key")
+        .version_id(version2)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_versioning_delete_creates_marker() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-versioning-delete-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Put object
+    let put_result = client
+        .put_object()
+        .bucket(bucket)
+        .key("delete-marker-key")
+        .body(Bytes::from("original content").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    let original_version = put_result.version_id().expect("Should have version ID").to_string();
+
+    // Delete without version ID (should create delete marker)
+    let delete_result = client
+        .delete_object()
+        .bucket(bucket)
+        .key("delete-marker-key")
+        .send()
+        .await
+        .expect("Failed to delete object");
+
+    assert!(
+        delete_result.delete_marker().unwrap_or(false),
+        "Should indicate delete marker was created"
+    );
+    let delete_marker_version = delete_result
+        .version_id()
+        .expect("Should return delete marker version ID")
+        .to_string();
+
+    // Get object should now fail (404)
+    let get_result = client
+        .get_object()
+        .bucket(bucket)
+        .key("delete-marker-key")
+        .send()
+        .await;
+    assert!(get_result.is_err(), "Get should fail after delete marker");
+
+    // But getting the original version should still work
+    let get_original = client
+        .get_object()
+        .bucket(bucket)
+        .key("delete-marker-key")
+        .version_id(&original_version)
+        .send()
+        .await
+        .expect("Should be able to get original version");
+
+    let body = get_original.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("original content"));
+
+    // Cleanup: delete all versions including delete marker
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("delete-marker-key")
+        .version_id(&delete_marker_version)
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("delete-marker-key")
+        .version_id(&original_version)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_object_versions() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-list-versions-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Create multiple versions of same key
+    let mut version_ids = Vec::new();
+    for i in 1..=3 {
+        let result = client
+            .put_object()
+            .bucket(bucket)
+            .key("multi-version-key")
+            .body(Bytes::from(format!("content v{}", i)).into())
+            .send()
+            .await
+            .expect("Failed to put object");
+        version_ids.push(result.version_id().unwrap().to_string());
+    }
+
+    // Delete to create a delete marker
+    let delete_result = client
+        .delete_object()
+        .bucket(bucket)
+        .key("multi-version-key")
+        .send()
+        .await
+        .expect("Failed to delete");
+    let delete_marker_version = delete_result.version_id().unwrap().to_string();
+
+    // List versions
+    let list_result = client
+        .list_object_versions()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list object versions");
+
+    // Should have 3 versions
+    let versions = list_result.versions();
+    assert_eq!(versions.len(), 3, "Should have 3 object versions");
+
+    // Should have 1 delete marker
+    let delete_markers = list_result.delete_markers();
+    assert_eq!(delete_markers.len(), 1, "Should have 1 delete marker");
+
+    // Verify first version is marked as latest (which is the delete marker)
+    // The latest non-delete-marker version should have IsLatest=false now
+
+    // Cleanup: delete all versions
+    for vid in &version_ids {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key("multi-version-key")
+            .version_id(vid)
+            .send()
+            .await
+            .ok();
+    }
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("multi-version-key")
+        .version_id(&delete_marker_version)
+        .send()
+        .await
+        .ok();
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_versions_with_prefix() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-list-versions-prefix-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Put objects with different prefixes
+    let mut all_versions = Vec::new();
+
+    for prefix in ["prefix-a/", "prefix-b/"] {
+        for i in 1..=2 {
+            let result = client
+                .put_object()
+                .bucket(bucket)
+                .key(format!("{}key-{}", prefix, i))
+                .body(Bytes::from("content").into())
+                .send()
+                .await
+                .expect("Failed to put object");
+            all_versions.push((
+                format!("{}key-{}", prefix, i),
+                result.version_id().unwrap().to_string(),
+            ));
+        }
+    }
+
+    // List versions with prefix filter
+    let list_result = client
+        .list_object_versions()
+        .bucket(bucket)
+        .prefix("prefix-a/")
+        .send()
+        .await
+        .expect("Failed to list object versions");
+
+    // Should only have prefix-a versions
+    let versions = list_result.versions();
+    assert_eq!(versions.len(), 2, "Should have 2 versions for prefix-a/");
+
+    for v in versions {
+        assert!(
+            v.key().unwrap().starts_with("prefix-a/"),
+            "All keys should start with prefix-a/"
+        );
+    }
+
+    // Cleanup
+    for (key, vid) in &all_versions {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(key)
+            .version_id(vid)
+            .send()
+            .await
+            .ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_head_object_with_version() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-head-version-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Put two versions with different sizes
+    let put1 = client
+        .put_object()
+        .bucket(bucket)
+        .key("head-test-key")
+        .body(Bytes::from("short").into())
+        .send()
+        .await
+        .expect("Failed to put first version");
+    let version1 = put1.version_id().unwrap().to_string();
+
+    let put2 = client
+        .put_object()
+        .bucket(bucket)
+        .key("head-test-key")
+        .body(Bytes::from("much longer content here").into())
+        .send()
+        .await
+        .expect("Failed to put second version");
+    let version2 = put2.version_id().unwrap().to_string();
+
+    // Head current version
+    let head_current = client
+        .head_object()
+        .bucket(bucket)
+        .key("head-test-key")
+        .send()
+        .await
+        .expect("Failed to head current version");
+
+    assert_eq!(head_current.content_length(), Some(24)); // "much longer content here"
+    assert_eq!(head_current.version_id(), Some(version2.as_str()));
+
+    // Head specific version
+    let head_v1 = client
+        .head_object()
+        .bucket(bucket)
+        .key("head-test-key")
+        .version_id(&version1)
+        .send()
+        .await
+        .expect("Failed to head specific version");
+
+    assert_eq!(head_v1.content_length(), Some(5)); // "short"
+    assert_eq!(head_v1.version_id(), Some(version1.as_str()));
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("head-test-key")
+        .version_id(&version1)
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("head-test-key")
+        .version_id(&version2)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_delete_specific_version() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-delete-version-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Create 3 versions
+    let mut version_ids = Vec::new();
+    for i in 1..=3 {
+        let result = client
+            .put_object()
+            .bucket(bucket)
+            .key("delete-version-key")
+            .body(Bytes::from(format!("v{}", i)).into())
+            .send()
+            .await
+            .expect("Failed to put object");
+        version_ids.push(result.version_id().unwrap().to_string());
+    }
+
+    // Delete middle version permanently
+    let delete_result = client
+        .delete_object()
+        .bucket(bucket)
+        .key("delete-version-key")
+        .version_id(&version_ids[1])
+        .send()
+        .await
+        .expect("Failed to delete specific version");
+
+    // Should NOT be a delete marker when deleting specific version
+    assert!(
+        !delete_result.delete_marker().unwrap_or(false),
+        "Deleting specific version should not create delete marker"
+    );
+
+    // Verify version is gone
+    let get_deleted = client
+        .get_object()
+        .bucket(bucket)
+        .key("delete-version-key")
+        .version_id(&version_ids[1])
+        .send()
+        .await;
+    assert!(get_deleted.is_err(), "Deleted version should not exist");
+
+    // Other versions should still exist
+    let get_v1 = client
+        .get_object()
+        .bucket(bucket)
+        .key("delete-version-key")
+        .version_id(&version_ids[0])
+        .send()
+        .await;
+    assert!(get_v1.is_ok(), "Version 1 should still exist");
+
+    let get_v3 = client
+        .get_object()
+        .bucket(bucket)
+        .key("delete-version-key")
+        .version_id(&version_ids[2])
+        .send()
+        .await;
+    assert!(get_v3.is_ok(), "Version 3 should still exist");
+
+    // Cleanup remaining versions
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("delete-version-key")
+        .version_id(&version_ids[0])
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("delete-version-key")
+        .version_id(&version_ids[2])
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// GetObjectAttributes Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_attributes() {
+    use aws_sdk_s3::types::ObjectAttributes;
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-get-attrs-test";
+
+    // Create bucket and object
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("attrs-key")
+        .body(Bytes::from("test content for attributes").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Get object attributes
+    let result = client
+        .get_object_attributes()
+        .bucket(bucket)
+        .key("attrs-key")
+        .object_attributes(ObjectAttributes::Etag)
+        .object_attributes(ObjectAttributes::ObjectSize)
+        .object_attributes(ObjectAttributes::StorageClass)
+        .send()
+        .await
+        .expect("Failed to get object attributes");
+
+    // Verify attributes
+    assert!(result.e_tag().is_some(), "Should have ETag");
+    assert_eq!(result.object_size(), Some(27)); // "test content for attributes" = 27 bytes
+    assert!(result.storage_class().is_some(), "Should have StorageClass");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("attrs-key")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_attributes_with_version() {
+    use aws_sdk_s3::types::ObjectAttributes;
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-get-attrs-version-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Put two versions with different sizes
+    let put1 = client
+        .put_object()
+        .bucket(bucket)
+        .key("attrs-version-key")
+        .body(Bytes::from("v1").into())
+        .send()
+        .await
+        .expect("Failed to put first version");
+    let version1 = put1.version_id().unwrap().to_string();
+
+    let put2 = client
+        .put_object()
+        .bucket(bucket)
+        .key("attrs-version-key")
+        .body(Bytes::from("version two is longer").into())
+        .send()
+        .await
+        .expect("Failed to put second version");
+    let version2 = put2.version_id().unwrap().to_string();
+
+    // Get attributes for specific version
+    let result = client
+        .get_object_attributes()
+        .bucket(bucket)
+        .key("attrs-version-key")
+        .version_id(&version1)
+        .object_attributes(ObjectAttributes::ObjectSize)
+        .send()
+        .await
+        .expect("Failed to get object attributes");
+
+    assert_eq!(result.object_size(), Some(2)); // "v1"
+
+    // Get attributes for current version
+    let result2 = client
+        .get_object_attributes()
+        .bucket(bucket)
+        .key("attrs-version-key")
+        .object_attributes(ObjectAttributes::ObjectSize)
+        .send()
+        .await
+        .expect("Failed to get object attributes");
+
+    assert_eq!(result2.object_size(), Some(21)); // "version two is longer"
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("attrs-version-key")
+        .version_id(&version1)
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("attrs-version-key")
+        .version_id(&version2)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// UploadPartCopy Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_upload_part_copy() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-upload-part-copy-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create source object
+    let source_data = Bytes::from("This is source data for copy");
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("source-object")
+        .body(source_data.clone().into())
+        .send()
+        .await
+        .expect("Failed to put source object");
+
+    // Create multipart upload
+    let create_response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("copied-multipart")
+        .send()
+        .await
+        .expect("Failed to create multipart upload");
+
+    let upload_id = create_response.upload_id().unwrap();
+
+    // Upload part by copying from source
+    let copy_result = client
+        .upload_part_copy()
+        .bucket(bucket)
+        .key("copied-multipart")
+        .upload_id(upload_id)
+        .part_number(1)
+        .copy_source(format!("{}/source-object", bucket))
+        .send()
+        .await
+        .expect("Failed to upload part copy");
+
+    let etag = copy_result
+        .copy_part_result()
+        .expect("Should have copy part result")
+        .e_tag()
+        .expect("Should have ETag");
+
+    // Complete the multipart upload
+    let completed_upload = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(etag)
+                .build(),
+        )
+        .build();
+
+    client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("copied-multipart")
+        .upload_id(upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+        .expect("Failed to complete multipart upload");
+
+    // Verify the copied object
+    let get_response = client
+        .get_object()
+        .bucket(bucket)
+        .key("copied-multipart")
+        .send()
+        .await
+        .expect("Failed to get copied object");
+
+    let body = get_response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, source_data);
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("source-object")
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("copied-multipart")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_versioning_complete_workflow_with_fixtures() {
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-versioning-workflow-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Enable versioning
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Fixture paths
+    let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("versioning");
+    let v1_fixture = fixtures_dir.join("document_v1.txt");
+    let v2_fixture = fixtures_dir.join("document_v2.txt");
+    let v3_fixture = fixtures_dir.join("document_v3.txt");
+
+    // Create temp directory for downloads
+    let tmp_dir = TempDir::new().expect("Failed to create temp dir");
+
+    // Read fixture files
+    let v1_content = tokio::fs::read(&v1_fixture).await.expect("Failed to read v1 fixture");
+    let v2_content = tokio::fs::read(&v2_fixture).await.expect("Failed to read v2 fixture");
+    let v3_content = tokio::fs::read(&v3_fixture).await.expect("Failed to read v3 fixture");
+
+    // ==========================================================================
+    // Step 1: Upload first version with tags
+    // ==========================================================================
+    let put_v1 = client
+        .put_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .body(Bytes::from(v1_content.clone()).into())
+        .content_type("text/plain")
+        .send()
+        .await
+        .expect("Failed to put first version");
+
+    let version1_id = put_v1.version_id().expect("Should return version ID").to_string();
+    assert!(!version1_id.is_empty(), "Version 1 ID should not be empty");
+
+    // Add tags to the object
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("document.txt")
+        .tagging(
+            aws_sdk_s3::types::Tagging::builder()
+                .tag_set(
+                    aws_sdk_s3::types::Tag::builder()
+                        .key("Environment")
+                        .value("Test")
+                        .build()
+                        .unwrap()
+                )
+                .tag_set(
+                    aws_sdk_s3::types::Tag::builder()
+                        .key("Version")
+                        .value("1.0")
+                        .build()
+                        .unwrap()
+                )
+                .build()
+                .unwrap()
+        )
+        .send()
+        .await
+        .expect("Failed to put tags");
+
+    // ==========================================================================
+    // Step 2: Read back tags and verify
+    // ==========================================================================
+    let tags_result = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("document.txt")
+        .send()
+        .await
+        .expect("Failed to get tags");
+
+    let tags: Vec<_> = tags_result.tag_set().iter().collect();
+    assert_eq!(tags.len(), 2, "Should have 2 tags");
+
+    // Verify tag values
+    let env_tag = tags.iter().find(|t| t.key() == "Environment").expect("Should have Environment tag");
+    assert_eq!(env_tag.value(), "Test");
+    let version_tag = tags.iter().find(|t| t.key() == "Version").expect("Should have Version tag");
+    assert_eq!(version_tag.value(), "1.0");
+
+    // ==========================================================================
+    // Step 3: Upload second version
+    // ==========================================================================
+    let put_v2 = client
+        .put_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .body(Bytes::from(v2_content.clone()).into())
+        .content_type("text/plain")
+        .send()
+        .await
+        .expect("Failed to put second version");
+
+    let version2_id = put_v2.version_id().expect("Should return version ID").to_string();
+    assert_ne!(version1_id, version2_id, "Version IDs should be different");
+
+    // ==========================================================================
+    // Step 4: Download current version and compare with v2 fixture
+    // ==========================================================================
+    let get_v2 = client
+        .get_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .send()
+        .await
+        .expect("Failed to get current version");
+
+    let v2_downloaded = get_v2.body.collect().await.unwrap().into_bytes();
+    let v2_download_path = tmp_dir.path().join("downloaded_v2.txt");
+    tokio::fs::write(&v2_download_path, &v2_downloaded).await.expect("Failed to write downloaded v2");
+
+    // Compare with fixture
+    assert_eq!(v2_downloaded.as_ref(), v2_content.as_slice(), "Downloaded v2 should match fixture");
+
+    // ==========================================================================
+    // Step 5: Upload third version
+    // ==========================================================================
+    let put_v3 = client
+        .put_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .body(Bytes::from(v3_content.clone()).into())
+        .content_type("text/plain")
+        .send()
+        .await
+        .expect("Failed to put third version");
+
+    let version3_id = put_v3.version_id().expect("Should return version ID").to_string();
+
+    // ==========================================================================
+    // Step 6: Download current version and compare with v3 fixture
+    // ==========================================================================
+    let get_v3 = client
+        .get_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .send()
+        .await
+        .expect("Failed to get v3");
+
+    let v3_downloaded = get_v3.body.collect().await.unwrap().into_bytes();
+    let v3_download_path = tmp_dir.path().join("downloaded_v3.txt");
+    tokio::fs::write(&v3_download_path, &v3_downloaded).await.expect("Failed to write downloaded v3");
+
+    // Compare with fixture
+    assert_eq!(v3_downloaded.as_ref(), v3_content.as_slice(), "Downloaded v3 should match fixture");
+
+    // ==========================================================================
+    // Step 7: Access first version via versioning and compare with v1 fixture
+    // ==========================================================================
+    let get_v1 = client
+        .get_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .version_id(&version1_id)
+        .send()
+        .await
+        .expect("Failed to get v1 via version ID");
+
+    let v1_downloaded = get_v1.body.collect().await.unwrap().into_bytes();
+    let v1_download_path = tmp_dir.path().join("downloaded_v1.txt");
+    tokio::fs::write(&v1_download_path, &v1_downloaded).await.expect("Failed to write downloaded v1");
+
+    // Compare with fixture
+    assert_eq!(v1_downloaded.as_ref(), v1_content.as_slice(), "Downloaded v1 should match fixture");
+
+    // ==========================================================================
+    // Step 8: Verify tags are still accessible on v1 (via version_id)
+    // Note: In S3, tags are per-version. get_object_tagging without version_id
+    // returns tags for the current version (v3), which has no tags.
+    // To verify v1's tags are still accessible, we need to specify version_id.
+    // ==========================================================================
+    let tags_result_again = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("document.txt")
+        .version_id(&version1_id)
+        .send()
+        .await
+        .expect("Failed to get tags again");
+
+    let tags_again: Vec<_> = tags_result_again.tag_set().iter().collect();
+    assert_eq!(tags_again.len(), 2, "Should still have 2 tags on v1");
+
+    // ==========================================================================
+    // Step 9: List versions to verify all versions exist
+    // ==========================================================================
+    let list_versions = client
+        .list_object_versions()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list versions");
+
+    let versions = list_versions.versions();
+    assert_eq!(versions.len(), 3, "Should have 3 versions");
+
+    // ==========================================================================
+    // Step 10: Delete the object (creates delete marker)
+    // ==========================================================================
+    let delete_result = client
+        .delete_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .send()
+        .await
+        .expect("Failed to delete object");
+
+    assert!(
+        delete_result.delete_marker().unwrap_or(false),
+        "Should create a delete marker"
+    );
+    let delete_marker_version = delete_result.version_id().expect("Should have delete marker version ID").to_string();
+
+    // ==========================================================================
+    // Step 11: Verify object appears deleted (404)
+    // ==========================================================================
+    let get_after_delete = client
+        .get_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .send()
+        .await;
+    assert!(get_after_delete.is_err(), "Object should appear deleted");
+
+    // ==========================================================================
+    // Step 12: Verify versions still accessible via version ID
+    // ==========================================================================
+    let get_v1_after_delete = client
+        .get_object()
+        .bucket(bucket)
+        .key("document.txt")
+        .version_id(&version1_id)
+        .send()
+        .await
+        .expect("V1 should still be accessible via version ID");
+
+    let v1_content_after_delete = get_v1_after_delete.body.collect().await.unwrap().into_bytes();
+    assert_eq!(v1_content_after_delete.as_ref(), v1_content.as_slice(), "V1 content should match after delete");
+
+    // ==========================================================================
+    // Step 13: List versions to verify delete marker exists
+    // ==========================================================================
+    let list_after_delete = client
+        .list_object_versions()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list versions after delete");
+
+    let delete_markers = list_after_delete.delete_markers();
+    assert_eq!(delete_markers.len(), 1, "Should have 1 delete marker");
+    assert_eq!(list_after_delete.versions().len(), 3, "Should still have 3 versions");
+
+    // ==========================================================================
+    // Cleanup: Delete all versions and delete marker
+    // ==========================================================================
+    for vid in [&version1_id, &version2_id, &version3_id, &delete_marker_version] {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key("document.txt")
+            .version_id(vid)
+            .send()
+            .await
+            .ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_upload_part_copy_with_range() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-upload-part-copy-range-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create source object with known content
+    let source_data = Bytes::from("0123456789ABCDEFGHIJ"); // 20 bytes
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("range-source")
+        .body(source_data.into())
+        .send()
+        .await
+        .expect("Failed to put source object");
+
+    // Create multipart upload
+    let create_response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("range-copied")
+        .send()
+        .await
+        .expect("Failed to create multipart upload");
+
+    let upload_id = create_response.upload_id().unwrap();
+
+    // Copy only bytes 5-14 (10 bytes: "56789ABCDE")
+    let copy_result = client
+        .upload_part_copy()
+        .bucket(bucket)
+        .key("range-copied")
+        .upload_id(upload_id)
+        .part_number(1)
+        .copy_source(format!("{}/range-source", bucket))
+        .copy_source_range("bytes=5-14")
+        .send()
+        .await
+        .expect("Failed to upload part copy with range");
+
+    let etag = copy_result
+        .copy_part_result()
+        .expect("Should have copy part result")
+        .e_tag()
+        .expect("Should have ETag");
+
+    // Complete the multipart upload
+    let completed_upload = CompletedMultipartUpload::builder()
+        .parts(
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag(etag)
+                .build(),
+        )
+        .build();
+
+    client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("range-copied")
+        .upload_id(upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+        .expect("Failed to complete multipart upload");
+
+    // Verify the copied object contains only the range
+    let get_response = client
+        .get_object()
+        .bucket(bucket)
+        .key("range-copied")
+        .send()
+        .await
+        .expect("Failed to get copied object");
+
+    let body = get_response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("56789ABCDE"));
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("range-source")
+        .send()
+        .await
+        .ok();
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("range-copied")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Additional Coverage Tests - P0 Gaps
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_head_bucket() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-head-bucket-test";
+
+    // Create bucket
+    client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to create bucket");
+
+    // Head bucket should succeed
+    client
+        .head_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("HeadBucket should succeed for existing bucket");
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_head_bucket_not_found() {
+    let client = create_s3_client().await;
+
+    // Head non-existent bucket should fail
+    let result = client
+        .head_bucket()
+        .bucket("nonexistent-bucket-12345")
+        .send()
+        .await;
+
+    assert!(result.is_err(), "HeadBucket should fail for non-existent bucket");
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_get_bucket_location() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-location-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Get bucket location
+    let result = client
+        .get_bucket_location()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get bucket location");
+
+    // Location should be set (us-east-1 returns empty/null per S3 spec, or actual region)
+    // Just verify the call succeeds
+    let _location = result.location_constraint();
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_objects_v1() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-list-v1-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create objects
+    for i in 0..3 {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(format!("key-{}", i))
+            .body(Bytes::from("data").into())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List objects using v1 API
+    let response = client
+        .list_objects()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list objects v1");
+
+    let contents = response.contents();
+    assert_eq!(contents.len(), 3, "Should have 3 objects");
+
+    // Cleanup
+    for i in 0..3 {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(format!("key-{}", i))
+            .send()
+            .await
+            .ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_copy_object_cross_bucket() {
+    let client = create_s3_client().await;
+    let src_bucket = "sdk-cross-copy-src";
+    let dest_bucket = "sdk-cross-copy-dest";
+
+    // Create both buckets
+    let _ = client.create_bucket().bucket(src_bucket).send().await;
+    let _ = client.create_bucket().bucket(dest_bucket).send().await;
+
+    // Put object in source bucket
+    let content = Bytes::from("cross-bucket copy content");
+    client
+        .put_object()
+        .bucket(src_bucket)
+        .key("source-key")
+        .body(content.clone().into())
+        .send()
+        .await
+        .expect("Failed to put source object");
+
+    // Copy to different bucket
+    client
+        .copy_object()
+        .bucket(dest_bucket)
+        .key("dest-key")
+        .copy_source(format!("{}/source-key", src_bucket))
+        .send()
+        .await
+        .expect("Failed to copy object cross-bucket");
+
+    // Verify copy in destination bucket
+    let get_response = client
+        .get_object()
+        .bucket(dest_bucket)
+        .key("dest-key")
+        .send()
+        .await
+        .expect("Failed to get copied object");
+
+    let body = get_response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, content, "Copied content should match");
+
+    // Cleanup
+    client.delete_object().bucket(src_bucket).key("source-key").send().await.ok();
+    client.delete_object().bucket(dest_bucket).key("dest-key").send().await.ok();
+    let _ = client.delete_bucket().bucket(src_bucket).send().await;
+    let _ = client.delete_bucket().bucket(dest_bucket).send().await;
+}
+
+// =============================================================================
+// Error Handling Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_not_found() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-404-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Get non-existent object should fail with NoSuchKey
+    let result = client
+        .get_object()
+        .bucket(bucket)
+        .key("nonexistent-key")
+        .send()
+        .await;
+
+    assert!(result.is_err(), "GetObject should fail for non-existent key");
+    let err = format!("{:?}", result.err().unwrap());
+    assert!(
+        err.contains("NoSuchKey") || err.contains("not found") || err.contains("404"),
+        "Error should indicate key not found: {}", err
+    );
+
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_delete_non_empty_bucket() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-non-empty-delete-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put an object
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("blocking-key")
+        .body(Bytes::from("data").into())
+        .send()
+        .await
+        .unwrap();
+
+    // Try to delete bucket (should fail - bucket not empty)
+    let result = client.delete_bucket().bucket(bucket).send().await;
+    assert!(result.is_err(), "Should not be able to delete non-empty bucket");
+
+    // Cleanup properly
+    client.delete_object().bucket(bucket).key("blocking-key").send().await.ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_put_object_to_nonexistent_bucket() {
+    let client = create_s3_client().await;
+
+    // Put object to non-existent bucket should fail
+    let result = client
+        .put_object()
+        .bucket("nonexistent-bucket-xyz-123")
+        .key("test-key")
+        .body(Bytes::from("data").into())
+        .send()
+        .await;
+
+    assert!(result.is_err(), "PutObject should fail for non-existent bucket");
+}
+
+// =============================================================================
+// ListObjectsV2 Advanced Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_list_objects_v2_pagination() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-pagination-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create 10 objects
+    for i in 0..10 {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(format!("key-{:02}", i))
+            .body(Bytes::from("data").into())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List with max_keys=3 (first page)
+    let page1 = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .max_keys(3)
+        .send()
+        .await
+        .expect("Failed to list first page");
+
+    assert_eq!(page1.contents().len(), 3, "First page should have 3 objects");
+    assert!(page1.is_truncated().unwrap_or(false), "Should be truncated");
+    let token = page1.next_continuation_token().expect("Should have continuation token");
+
+    // Get second page
+    let page2 = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .max_keys(3)
+        .continuation_token(token)
+        .send()
+        .await
+        .expect("Failed to list second page");
+
+    assert_eq!(page2.contents().len(), 3, "Second page should have 3 objects");
+    assert!(page2.is_truncated().unwrap_or(false), "Should still be truncated");
+
+    // Get remaining objects
+    let token2 = page2.next_continuation_token().expect("Should have token");
+    let page3 = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .max_keys(3)
+        .continuation_token(token2)
+        .send()
+        .await
+        .expect("Failed to list third page");
+
+    assert_eq!(page3.contents().len(), 3, "Third page should have 3 objects");
+
+    // Fourth page should have 1 remaining object
+    let token3 = page3.next_continuation_token().expect("Should have token");
+    let page4 = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .max_keys(3)
+        .continuation_token(token3)
+        .send()
+        .await
+        .expect("Failed to list fourth page");
+
+    assert_eq!(page4.contents().len(), 1, "Fourth page should have 1 object");
+    assert!(!page4.is_truncated().unwrap_or(true), "Should not be truncated");
+
+    // Cleanup
+    for i in 0..10 {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(format!("key-{:02}", i))
+            .send()
+            .await
+            .ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_list_objects_v2_delimiter() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-delimiter-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create folder-like structure
+    let keys = vec![
+        "folder1/file1.txt",
+        "folder1/file2.txt",
+        "folder1/subfolder/file3.txt",
+        "folder2/file4.txt",
+        "root-file.txt",
+    ];
+
+    for key in &keys {
+        client
+            .put_object()
+            .bucket(bucket)
+            .key(*key)
+            .body(Bytes::from("data").into())
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // List with delimiter at root level
+    let response = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .delimiter("/")
+        .send()
+        .await
+        .expect("Failed to list with delimiter");
+
+    // Should have 1 file at root and 2 common prefixes (folder1/, folder2/)
+    assert_eq!(response.contents().len(), 1, "Should have 1 root-level file");
+    assert_eq!(response.common_prefixes().len(), 2, "Should have 2 folder prefixes");
+
+    // List folder1 contents
+    let folder1_response = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix("folder1/")
+        .delimiter("/")
+        .send()
+        .await
+        .expect("Failed to list folder1");
+
+    assert_eq!(folder1_response.contents().len(), 2, "folder1 should have 2 direct files");
+    assert_eq!(folder1_response.common_prefixes().len(), 1, "folder1 should have 1 subfolder");
+
+    // Cleanup
+    for key in &keys {
+        client.delete_object().bucket(bucket).key(*key).send().await.ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Workflow Tests - Full Integration Scenarios
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_workflow_multipart_with_versioning() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-multipart-versioning-workflow";
+
+    // Setup: Create bucket and enable versioning
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to enable versioning");
+
+    // Create first version via multipart upload
+    let create1 = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .send()
+        .await
+        .unwrap();
+    let upload_id1 = create1.upload_id().unwrap();
+
+    let part1 = client
+        .upload_part()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .upload_id(upload_id1)
+        .part_number(1)
+        .body(Bytes::from("version 1 content from multipart").into())
+        .send()
+        .await
+        .unwrap();
+
+    let complete1 = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .upload_id(upload_id1)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .parts(
+                    CompletedPart::builder()
+                        .part_number(1)
+                        .e_tag(part1.e_tag().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to complete first multipart");
+
+    let version1_id = complete1.version_id().expect("Should have version ID").to_string();
+
+    // Create second version via multipart
+    let create2 = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .send()
+        .await
+        .unwrap();
+    let upload_id2 = create2.upload_id().unwrap();
+
+    let part2 = client
+        .upload_part()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .upload_id(upload_id2)
+        .part_number(1)
+        .body(Bytes::from("version 2 content from multipart - longer").into())
+        .send()
+        .await
+        .unwrap();
+
+    let complete2 = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .upload_id(upload_id2)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .parts(
+                    CompletedPart::builder()
+                        .part_number(1)
+                        .e_tag(part2.e_tag().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to complete second multipart");
+
+    let version2_id = complete2.version_id().expect("Should have version ID").to_string();
+    assert_ne!(version1_id, version2_id, "Versions should be different");
+
+    // Verify both versions accessible
+    let get_v1 = client
+        .get_object()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .version_id(&version1_id)
+        .send()
+        .await
+        .expect("Failed to get v1");
+    let body_v1 = get_v1.body.collect().await.unwrap().into_bytes();
+    assert!(body_v1.starts_with(b"version 1"));
+
+    let get_v2 = client
+        .get_object()
+        .bucket(bucket)
+        .key("multipart-versioned")
+        .version_id(&version2_id)
+        .send()
+        .await
+        .expect("Failed to get v2");
+    let body_v2 = get_v2.body.collect().await.unwrap().into_bytes();
+    assert!(body_v2.starts_with(b"version 2"));
+
+    // List versions
+    let versions = client
+        .list_object_versions()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list versions");
+    assert_eq!(versions.versions().len(), 2, "Should have 2 versions");
+
+    // Cleanup
+    client.delete_object().bucket(bucket).key("multipart-versioned").version_id(&version1_id).send().await.ok();
+    client.delete_object().bucket(bucket).key("multipart-versioned").version_id(&version2_id).send().await.ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_workflow_full_object_lifecycle() {
+    use aws_sdk_s3::types::ObjectCannedAcl;
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-lifecycle-workflow";
+
+    // Step 1: Create bucket with tags
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    let bucket_tag = Tag::builder().key("purpose").value("testing").build().unwrap();
+    client
+        .put_bucket_tagging()
+        .bucket(bucket)
+        .tagging(Tagging::builder().tag_set(bucket_tag).build().unwrap())
+        .send()
+        .await
+        .expect("Failed to tag bucket");
+
+    // Step 2: Upload object with ACL
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .body(Bytes::from("initial content").into())
+        .content_type("text/plain")
+        .acl(ObjectCannedAcl::Private)
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Step 3: Add object tags
+    let obj_tag1 = Tag::builder().key("status").value("draft").build().unwrap();
+    let obj_tag2 = Tag::builder().key("owner").value("test-user").build().unwrap();
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .tagging(Tagging::builder().tag_set(obj_tag1).tag_set(obj_tag2).build().unwrap())
+        .send()
+        .await
+        .expect("Failed to tag object");
+
+    // Step 4: Verify object metadata
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .send()
+        .await
+        .expect("Failed to head object");
+    assert_eq!(head.content_type(), Some("text/plain"));
+
+    // Step 5: Update object (overwrite)
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .body(Bytes::from("updated content - version 2").into())
+        .content_type("text/plain")
+        .send()
+        .await
+        .expect("Failed to update object");
+
+    // Step 6: Verify updated content
+    let get_response = client
+        .get_object()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .send()
+        .await
+        .expect("Failed to get object");
+    let body = get_response.body.collect().await.unwrap().into_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("version 2"));
+
+    // Step 7: Copy object to new key
+    client
+        .copy_object()
+        .bucket(bucket)
+        .key("lifecycle-object-copy")
+        .copy_source(format!("{}/lifecycle-object", bucket))
+        .send()
+        .await
+        .expect("Failed to copy object");
+
+    // Step 8: Verify copy exists and has same content as updated object
+    let copy_head = client
+        .head_object()
+        .bucket(bucket)
+        .key("lifecycle-object-copy")
+        .send()
+        .await
+        .expect("Failed to head copy");
+    // Copy should have same length as updated object (27 bytes: "updated content - version 2")
+    assert_eq!(copy_head.content_length(), Some(27), "Copy should match updated object size");
+
+    // Step 9: Update tags (change status)
+    let updated_tag = Tag::builder().key("status").value("published").build().unwrap();
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .tagging(Tagging::builder().tag_set(updated_tag).build().unwrap())
+        .send()
+        .await
+        .expect("Failed to update tags");
+
+    // Step 10: Verify updated tags
+    let tags = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .send()
+        .await
+        .expect("Failed to get tags");
+    let status_tag = tags.tag_set().iter().find(|t| t.key() == "status");
+    assert_eq!(status_tag.map(|t| t.value()), Some("published"));
+
+    // Step 11: Change ACL to public-read
+    client
+        .put_object_acl()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .expect("Failed to update ACL");
+
+    // Step 12: Verify ACL
+    let acl = client
+        .get_object_acl()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .send()
+        .await
+        .expect("Failed to get ACL");
+    let has_public = acl.grants().iter().any(|g| {
+        g.grantee()
+            .and_then(|grantee| grantee.uri())
+            .map(|uri| uri.contains("AllUsers"))
+            .unwrap_or(false)
+    });
+    assert!(has_public, "Should have public read grant");
+
+    // Step 13: Delete original, verify copy still exists
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("lifecycle-object")
+        .send()
+        .await
+        .expect("Failed to delete original");
+
+    let copy_still_exists = client
+        .head_object()
+        .bucket(bucket)
+        .key("lifecycle-object-copy")
+        .send()
+        .await;
+    assert!(copy_still_exists.is_ok(), "Copy should still exist");
+
+    // Cleanup
+    client.delete_object().bucket(bucket).key("lifecycle-object-copy").send().await.ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_workflow_concurrent_multipart_uploads() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-concurrent-multipart";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Start multiple multipart uploads for same key
+    let upload1 = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .send()
+        .await
+        .unwrap();
+    let upload_id1 = upload1.upload_id().unwrap().to_string();
+
+    let upload2 = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .send()
+        .await
+        .unwrap();
+    let upload_id2 = upload2.upload_id().unwrap().to_string();
+
+    // Both uploads should be listed
+    let uploads = client
+        .list_multipart_uploads()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list uploads");
+    assert_eq!(uploads.uploads().len(), 2, "Should have 2 in-progress uploads");
+
+    // Upload parts to both
+    let _part1_resp = client
+        .upload_part()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .upload_id(&upload_id1)
+        .part_number(1)
+        .body(Bytes::from("upload 1 data").into())
+        .send()
+        .await
+        .unwrap();
+
+    let part2_resp = client
+        .upload_part()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .upload_id(&upload_id2)
+        .part_number(1)
+        .body(Bytes::from("upload 2 data - longer").into())
+        .send()
+        .await
+        .unwrap();
+
+    // Complete upload 2 (should become the object)
+    client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .upload_id(&upload_id2)
+        .multipart_upload(
+            CompletedMultipartUpload::builder()
+                .parts(
+                    CompletedPart::builder()
+                        .part_number(1)
+                        .e_tag(part2_resp.e_tag().unwrap())
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Failed to complete upload 2");
+
+    // Verify object has upload 2's content
+    let get = client
+        .get_object()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .send()
+        .await
+        .expect("Failed to get object");
+    let body = get.body.collect().await.unwrap().into_bytes();
+    assert!(String::from_utf8_lossy(&body).contains("upload 2"));
+
+    // Abort upload 1
+    client
+        .abort_multipart_upload()
+        .bucket(bucket)
+        .key("concurrent-key")
+        .upload_id(&upload_id1)
+        .send()
+        .await
+        .expect("Failed to abort upload 1");
+
+    // No uploads should remain
+    let remaining = client
+        .list_multipart_uploads()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to list");
+    assert!(remaining.uploads().is_empty(), "No uploads should remain");
+
+    // Cleanup
+    client.delete_object().bucket(bucket).key("concurrent-key").send().await.ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_workflow_tagging_with_versioning() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-tagging-versioning-workflow";
+
+    // Setup
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create v1 with tags
+    let put1 = client
+        .put_object()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .body(Bytes::from("version 1").into())
+        .send()
+        .await
+        .unwrap();
+    let v1_id = put1.version_id().unwrap().to_string();
+
+    // Tag v1
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .version_id(&v1_id)
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("version").value("1.0").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create v2 with different tags
+    let put2 = client
+        .put_object()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .body(Bytes::from("version 2").into())
+        .send()
+        .await
+        .unwrap();
+    let v2_id = put2.version_id().unwrap().to_string();
+
+    // Tag v2
+    client
+        .put_object_tagging()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .version_id(&v2_id)
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("version").value("2.0").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Verify v1 tags
+    let v1_tags = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .version_id(&v1_id)
+        .send()
+        .await
+        .unwrap();
+    let v1_version_tag = v1_tags.tag_set().iter().find(|t| t.key() == "version");
+    assert_eq!(v1_version_tag.map(|t| t.value()), Some("1.0"));
+
+    // Verify v2 tags
+    let v2_tags = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .version_id(&v2_id)
+        .send()
+        .await
+        .unwrap();
+    let v2_version_tag = v2_tags.tag_set().iter().find(|t| t.key() == "version");
+    assert_eq!(v2_version_tag.map(|t| t.value()), Some("2.0"));
+
+    // Verify current (no version_id) returns v2's tags
+    let current_tags = client
+        .get_object_tagging()
+        .bucket(bucket)
+        .key("tagged-versioned")
+        .send()
+        .await
+        .unwrap();
+    let current_version_tag = current_tags.tag_set().iter().find(|t| t.key() == "version");
+    assert_eq!(current_version_tag.map(|t| t.value()), Some("2.0"));
+
+    // Cleanup
+    client.delete_object().bucket(bucket).key("tagged-versioned").version_id(&v1_id).send().await.ok();
+    client.delete_object().bucket(bucket).key("tagged-versioned").version_id(&v2_id).send().await.ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_workflow_batch_delete_versioned() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-batch-delete-versioned";
+
+    // Setup
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_bucket_versioning()
+        .bucket(bucket)
+        .versioning_configuration(
+            aws_sdk_s3::types::VersioningConfiguration::builder()
+                .status(aws_sdk_s3::types::BucketVersioningStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Create multiple objects with versions
+    let mut all_versions = Vec::new();
+    for i in 0..3 {
+        let put = client
+            .put_object()
+            .bucket(bucket)
+            .key(format!("obj-{}", i))
+            .body(Bytes::from("data").into())
+            .send()
+            .await
+            .unwrap();
+        all_versions.push((format!("obj-{}", i), put.version_id().unwrap().to_string()));
+    }
+
+    // Batch delete without version IDs (creates delete markers)
+    let objects_to_delete: Vec<ObjectIdentifier> = (0..3)
+        .map(|i| {
+            ObjectIdentifier::builder()
+                .key(format!("obj-{}", i))
+                .build()
+                .unwrap()
+        })
+        .collect();
+
+    let delete = Delete::builder()
+        .set_objects(Some(objects_to_delete))
+        .build()
+        .unwrap();
+
+    let response = client
+        .delete_objects()
+        .bucket(bucket)
+        .delete(delete)
+        .send()
+        .await
+        .expect("Failed to batch delete");
+
+    // All should be marked as deleted (delete markers created)
+    assert_eq!(response.deleted().len(), 3);
+
+    // Collect delete marker version IDs
+    let delete_markers: Vec<String> = response
+        .deleted()
+        .iter()
+        .filter_map(|d| d.delete_marker_version_id().map(|s| s.to_string()))
+        .collect();
+    assert_eq!(delete_markers.len(), 3, "Should have 3 delete markers");
+
+    // Verify objects appear deleted
+    for i in 0..3 {
+        let get = client
+            .get_object()
+            .bucket(bucket)
+            .key(format!("obj-{}", i))
+            .send()
+            .await;
+        assert!(get.is_err(), "Object {} should appear deleted", i);
+    }
+
+    // But original versions still accessible
+    for (key, vid) in &all_versions {
+        let get = client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .version_id(vid)
+            .send()
+            .await;
+        assert!(get.is_ok(), "Original version of {} should still exist", key);
+    }
+
+    // Cleanup: delete all versions and delete markers
+    for (key, vid) in &all_versions {
+        client.delete_object().bucket(bucket).key(key).version_id(vid).send().await.ok();
+    }
+    for (i, dm_vid) in delete_markers.iter().enumerate() {
+        client.delete_object().bucket(bucket).key(format!("obj-{}", i)).version_id(dm_vid).send().await.ok();
+    }
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Realistic Part Size Multipart Tests
+// =============================================================================
+
+/// Tests multipart upload with realistic part sizes (5MB minimum per S3 spec)
+/// This test verifies that the implementation handles real-world multipart uploads
+/// where parts must be at least 5MB (except the last part).
+#[tokio::test]
+#[ignore]
+async fn test_multipart_upload_realistic_part_sizes() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-multipart-realistic-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create multipart upload
+    let create_response = client
+        .create_multipart_upload()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .content_type("application/octet-stream")
+        .send()
+        .await
+        .expect("Failed to create multipart upload");
+
+    let upload_id = create_response.upload_id().unwrap();
+
+    // AWS S3 requires minimum 5MB parts (except last part)
+    // 5MB = 5 * 1024 * 1024 = 5,242,880 bytes
+    const PART_SIZE: usize = 5 * 1024 * 1024; // 5MB
+
+    // Upload 2 parts of 5MB each + 1 smaller final part
+    let mut completed_parts = Vec::new();
+
+    // Part 1: 5MB of 'A' bytes
+    let part1_data = Bytes::from(vec![b'A'; PART_SIZE]);
+    let part1_response = client
+        .upload_part()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .upload_id(upload_id)
+        .part_number(1)
+        .body(part1_data.clone().into())
+        .send()
+        .await
+        .expect("Failed to upload part 1");
+
+    completed_parts.push(
+        CompletedPart::builder()
+            .part_number(1)
+            .e_tag(part1_response.e_tag().unwrap())
+            .build(),
+    );
+
+    // Part 2: 5MB of 'B' bytes
+    let part2_data = Bytes::from(vec![b'B'; PART_SIZE]);
+    let part2_response = client
+        .upload_part()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .upload_id(upload_id)
+        .part_number(2)
+        .body(part2_data.clone().into())
+        .send()
+        .await
+        .expect("Failed to upload part 2");
+
+    completed_parts.push(
+        CompletedPart::builder()
+            .part_number(2)
+            .e_tag(part2_response.e_tag().unwrap())
+            .build(),
+    );
+
+    // Part 3: Small final part (1KB) - allowed to be smaller than 5MB
+    let part3_data = Bytes::from(vec![b'C'; 1024]);
+    let part3_response = client
+        .upload_part()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .upload_id(upload_id)
+        .part_number(3)
+        .body(part3_data.clone().into())
+        .send()
+        .await
+        .expect("Failed to upload part 3");
+
+    completed_parts.push(
+        CompletedPart::builder()
+            .part_number(3)
+            .e_tag(part3_response.e_tag().unwrap())
+            .build(),
+    );
+
+    // Complete the multipart upload
+    let completed_upload = CompletedMultipartUpload::builder()
+        .set_parts(Some(completed_parts))
+        .build();
+
+    let complete_response = client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .upload_id(upload_id)
+        .multipart_upload(completed_upload)
+        .send()
+        .await
+        .expect("Failed to complete multipart upload");
+
+    assert!(complete_response.e_tag().is_some(), "Should have ETag");
+
+    // Verify total size: 5MB + 5MB + 1KB = 10,486,784 bytes
+    let expected_size: i64 = (PART_SIZE * 2 + 1024) as i64;
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .send()
+        .await
+        .expect("Failed to head object");
+
+    assert_eq!(
+        head.content_length(),
+        Some(expected_size),
+        "Object size should match sum of parts"
+    );
+
+    // Verify content by reading ranges
+    // First 10 bytes should be 'A'
+    let get_start = client
+        .get_object()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .range("bytes=0-9")
+        .send()
+        .await
+        .expect("Failed to get start range");
+    let start_bytes = get_start.body.collect().await.unwrap().into_bytes();
+    assert!(start_bytes.iter().all(|&b| b == b'A'), "Start should be 'A' bytes");
+
+    // Bytes at 5MB offset should be 'B'
+    let get_middle = client
+        .get_object()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .range(format!("bytes={}-{}", PART_SIZE, PART_SIZE + 9))
+        .send()
+        .await
+        .expect("Failed to get middle range");
+    let middle_bytes = get_middle.body.collect().await.unwrap().into_bytes();
+    assert!(middle_bytes.iter().all(|&b| b == b'B'), "Middle should be 'B' bytes");
+
+    // Last 10 bytes should be 'C'
+    let get_end = client
+        .get_object()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .range(format!("bytes={}-{}", expected_size - 10, expected_size - 1))
+        .send()
+        .await
+        .expect("Failed to get end range");
+    let end_bytes = get_end.body.collect().await.unwrap().into_bytes();
+    assert!(end_bytes.iter().all(|&b| b == b'C'), "End should be 'C' bytes");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("large-multipart-file")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Range Request Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_range_request() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-range-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create object with known content: "0123456789ABCDEFGHIJ" (20 bytes)
+    let content = "0123456789ABCDEFGHIJ";
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .body(Bytes::from(content).into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Test 1: Get first 5 bytes (bytes=0-4)
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .range("bytes=0-4")
+        .send()
+        .await
+        .expect("Failed to get range 0-4");
+
+    let content_length = response.content_length();
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("01234"), "First 5 bytes should be 01234");
+    assert_eq!(content_length, Some(5));
+
+    // Test 2: Get middle bytes (bytes=5-9)
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .range("bytes=5-9")
+        .send()
+        .await
+        .expect("Failed to get range 5-9");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("56789"), "Middle bytes should be 56789");
+
+    // Test 3: Get last 5 bytes (bytes=-5 or bytes=15-19)
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .range("bytes=15-19")
+        .send()
+        .await
+        .expect("Failed to get range 15-19");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("FGHIJ"), "Last 5 bytes should be FGHIJ");
+
+    // Test 4: Get from offset to end (bytes=10-)
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .range("bytes=10-")
+        .send()
+        .await
+        .expect("Failed to get range 10-");
+
+    let content_length = response.content_length();
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("ABCDEFGHIJ"), "From offset 10 should be ABCDEFGHIJ");
+    assert_eq!(content_length, Some(10));
+
+    // Test 5: Get last N bytes (bytes=-3)
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .range("bytes=-3")
+        .send()
+        .await
+        .expect("Failed to get range -3");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("HIJ"), "Last 3 bytes should be HIJ");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("range-test-key")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_range_beyond_content() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-range-beyond-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create small object (10 bytes)
+    let content = "0123456789";
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("small-object")
+        .body(Bytes::from(content).into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Request range that starts within content but extends beyond
+    // S3 should return only the available bytes (bytes=5-100 for 10-byte object)
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("small-object")
+        .range("bytes=5-100")
+        .send()
+        .await
+        .expect("Failed to get oversized range");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("56789"), "Should return available bytes from offset 5");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("small-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Conditional Request Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_if_match() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-if-match-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put object and get its ETag
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .body(Bytes::from("test content").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .send()
+        .await
+        .expect("Failed to head object");
+
+    let etag = head.e_tag().expect("Should have ETag").to_string();
+
+    // Get with matching ETag should succeed
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .if_match(&etag)
+        .send()
+        .await
+        .expect("If-Match with correct ETag should succeed");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("test content"));
+
+    // Get with non-matching ETag should fail (PreconditionFailed)
+    let wrong_etag = "\"wrongetag123456789\"";
+    let result = client
+        .get_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .if_match(wrong_etag)
+        .send()
+        .await;
+
+    assert!(result.is_err(), "If-Match with wrong ETag should fail");
+    let err_str = format!("{:?}", result.err().unwrap());
+    assert!(
+        err_str.contains("PreconditionFailed") || err_str.contains("412"),
+        "Should be PreconditionFailed error: {}", err_str
+    );
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_get_object_if_none_match() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-if-none-match-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put object and get its ETag
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .body(Bytes::from("test content").into())
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    let head = client
+        .head_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .send()
+        .await
+        .expect("Failed to head object");
+
+    let etag = head.e_tag().expect("Should have ETag").to_string();
+
+    // Get with non-matching ETag should succeed (returns content)
+    let wrong_etag = "\"differentetag\"";
+    let response = client
+        .get_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .if_none_match(wrong_etag)
+        .send()
+        .await
+        .expect("If-None-Match with different ETag should succeed");
+
+    let body = response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("test content"));
+
+    // Get with matching ETag should return 304 Not Modified (or error in SDK)
+    let result = client
+        .get_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .if_none_match(&etag)
+        .send()
+        .await;
+
+    // When ETag matches, S3 returns 304 Not Modified
+    // The SDK typically surfaces this as an error
+    assert!(
+        result.is_err(),
+        "If-None-Match with matching ETag should indicate not modified"
+    );
+    let err_str = format!("{:?}", result.err().unwrap());
+    assert!(
+        err_str.contains("304") || err_str.contains("NotModified"),
+        "Should indicate not modified: {}", err_str
+    );
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("etag-key")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_put_object_if_none_match_for_create_only() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-put-if-none-match-test";
+
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Put object with If-None-Match: * (create only if doesn't exist)
+    let result = client
+        .put_object()
+        .bucket(bucket)
+        .key("new-object")
+        .body(Bytes::from("initial content").into())
+        .if_none_match("*")
+        .send()
+        .await;
+
+    // First put should succeed (object doesn't exist)
+    assert!(result.is_ok(), "First put with If-None-Match: * should succeed");
+
+    // Second put with same condition should fail (object exists)
+    let result = client
+        .put_object()
+        .bucket(bucket)
+        .key("new-object")
+        .body(Bytes::from("updated content").into())
+        .if_none_match("*")
+        .send()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Second put with If-None-Match: * should fail (object exists)"
+    );
+    let err_str = format!("{:?}", result.err().unwrap());
+    assert!(
+        err_str.contains("PreconditionFailed") || err_str.contains("412"),
+        "Should be PreconditionFailed: {}", err_str
+    );
+
+    // Verify original content is unchanged
+    let get = client
+        .get_object()
+        .bucket(bucket)
+        .key("new-object")
+        .send()
+        .await
+        .expect("Failed to get object");
+    let body = get.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("initial content"), "Content should be unchanged");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("new-object")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// =============================================================================
+// Bucket Lifecycle Configuration Tests
+// =============================================================================
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_lifecycle_configuration() {
+    use aws_sdk_s3::types::{
+        BucketLifecycleConfiguration, ExpirationStatus, LifecycleExpiration, LifecycleRule,
+        LifecycleRuleFilter,
+    };
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-lifecycle-config-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Create lifecycle rule: expire objects after 30 days
+    let expiration = LifecycleExpiration::builder().days(30).build();
+
+    let filter = LifecycleRuleFilter::builder()
+        .prefix("logs/")
+        .build();
+
+    let rule = LifecycleRule::builder()
+        .id("expire-after-30-days")
+        .status(ExpirationStatus::Enabled)
+        .filter(filter)
+        .expiration(expiration)
+        .build()
+        .expect("Failed to build lifecycle rule");
+
+    let lifecycle_config = BucketLifecycleConfiguration::builder()
+        .rules(rule)
+        .build()
+        .expect("Failed to build lifecycle configuration");
+
+    // Put lifecycle configuration
+    client
+        .put_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .lifecycle_configuration(lifecycle_config)
+        .send()
+        .await
+        .expect("Failed to put lifecycle configuration");
+
+    // Get lifecycle configuration
+    let result = client
+        .get_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get lifecycle configuration");
+
+    let rules = result.rules();
+    assert_eq!(rules.len(), 1, "Should have 1 lifecycle rule");
+
+    let rule = &rules[0];
+    assert_eq!(rule.id(), Some("expire-after-30-days"));
+    assert_eq!(*rule.status(), ExpirationStatus::Enabled);
+
+    // Verify expiration days
+    let expiration = rule.expiration().expect("Should have expiration");
+    assert_eq!(expiration.days(), Some(30));
+
+    // Delete lifecycle configuration
+    client
+        .delete_bucket_lifecycle()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to delete lifecycle configuration");
+
+    // Verify lifecycle is deleted (should return error)
+    let result = client
+        .get_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .send()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "GetBucketLifecycleConfiguration should fail after deletion"
+    );
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_lifecycle_no_configuration() {
+    let client = create_s3_client().await;
+    let bucket = "sdk-lifecycle-no-config-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Get lifecycle configuration on bucket without lifecycle should fail
+    let result = client
+        .get_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .send()
+        .await;
+
+    assert!(
+        result.is_err(),
+        "GetBucketLifecycleConfiguration should fail when no configuration exists"
+    );
+    let err_str = format!("{:?}", result.err().unwrap());
+    assert!(
+        err_str.contains("NoSuchLifecycleConfiguration") || err_str.contains("404"),
+        "Should indicate no lifecycle configuration: {}",
+        err_str
+    );
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn test_bucket_lifecycle_multiple_rules() {
+    use aws_sdk_s3::types::{
+        BucketLifecycleConfiguration, ExpirationStatus, LifecycleExpiration, LifecycleRule,
+        LifecycleRuleFilter, NoncurrentVersionExpiration,
+    };
+
+    let client = create_s3_client().await;
+    let bucket = "sdk-lifecycle-multi-rules-test";
+
+    // Create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Rule 1: Expire objects in logs/ after 7 days
+    let rule1 = LifecycleRule::builder()
+        .id("expire-logs-7-days")
+        .status(ExpirationStatus::Enabled)
+        .filter(LifecycleRuleFilter::builder().prefix("logs/").build())
+        .expiration(LifecycleExpiration::builder().days(7).build())
+        .build()
+        .expect("Failed to build rule 1");
+
+    // Rule 2: Expire objects in temp/ after 1 day
+    let rule2 = LifecycleRule::builder()
+        .id("expire-temp-1-day")
+        .status(ExpirationStatus::Enabled)
+        .filter(LifecycleRuleFilter::builder().prefix("temp/").build())
+        .expiration(LifecycleExpiration::builder().days(1).build())
+        .build()
+        .expect("Failed to build rule 2");
+
+    // Rule 3: Delete noncurrent versions after 30 days (disabled)
+    let rule3 = LifecycleRule::builder()
+        .id("cleanup-old-versions")
+        .status(ExpirationStatus::Disabled)
+        .filter(LifecycleRuleFilter::builder().prefix("").build())
+        .noncurrent_version_expiration(
+            NoncurrentVersionExpiration::builder()
+                .noncurrent_days(30)
+                .build(),
+        )
+        .build()
+        .expect("Failed to build rule 3");
+
+    let lifecycle_config = BucketLifecycleConfiguration::builder()
+        .rules(rule1)
+        .rules(rule2)
+        .rules(rule3)
+        .build()
+        .expect("Failed to build lifecycle configuration");
+
+    // Put lifecycle configuration
+    client
+        .put_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .lifecycle_configuration(lifecycle_config)
+        .send()
+        .await
+        .expect("Failed to put lifecycle configuration");
+
+    // Get and verify all rules
+    let result = client
+        .get_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to get lifecycle configuration");
+
+    let rules = result.rules();
+    assert_eq!(rules.len(), 3, "Should have 3 lifecycle rules");
+
+    // Verify rule IDs
+    let rule_ids: Vec<_> = rules.iter().filter_map(|r| r.id()).collect();
+    assert!(rule_ids.contains(&"expire-logs-7-days"));
+    assert!(rule_ids.contains(&"expire-temp-1-day"));
+    assert!(rule_ids.contains(&"cleanup-old-versions"));
+
+    // Verify logs rule
+    let logs_rule = rules.iter().find(|r| r.id() == Some("expire-logs-7-days")).unwrap();
+    assert_eq!(*logs_rule.status(), ExpirationStatus::Enabled);
+    assert_eq!(logs_rule.expiration().and_then(|e| e.days()), Some(7));
+
+    // Verify temp rule
+    let temp_rule = rules.iter().find(|r| r.id() == Some("expire-temp-1-day")).unwrap();
+    assert_eq!(*temp_rule.status(), ExpirationStatus::Enabled);
+    assert_eq!(temp_rule.expiration().and_then(|e| e.days()), Some(1));
+
+    // Verify disabled rule
+    let disabled_rule = rules.iter().find(|r| r.id() == Some("cleanup-old-versions")).unwrap();
+    assert_eq!(*disabled_rule.status(), ExpirationStatus::Disabled);
+
+    // Cleanup
+    client
+        .delete_bucket_lifecycle()
+        .bucket(bucket)
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+// ============================================================================
+// Pre-signed URL Tests
+// ============================================================================
+
+/// Test pre-signed GET URL for downloading objects
+#[tokio::test]
+#[ignore]
+async fn test_presigned_get_url() {
+    let client = create_s3_client().await;
+    let bucket = "presigned-get-test";
+
+    // Setup: create bucket and object
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .body(Bytes::from("pre-signed content").into())
+        .content_type("text/plain")
+        .send()
+        .await
+        .expect("Failed to put object");
+
+    // Generate pre-signed URL (valid for 1 hour)
+    let presigning_config =
+        aws_sdk_s3::presigning::PresigningConfig::expires_in(std::time::Duration::from_secs(3600))
+            .expect("Failed to create presigning config");
+
+    let presigned_request = client
+        .get_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .presigned(presigning_config)
+        .await
+        .expect("Failed to generate pre-signed URL");
+
+    // Use reqwest to fetch via pre-signed URL (no SDK auth)
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(presigned_request.uri())
+        .send()
+        .await
+        .expect("Failed to fetch via pre-signed URL");
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Pre-signed GET should return 200 OK"
+    );
+    let body = response.text().await.unwrap();
+    assert_eq!(body, "pre-signed content");
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test pre-signed PUT URL for uploading objects
+#[tokio::test]
+#[ignore]
+async fn test_presigned_put_url() {
+    let client = create_s3_client().await;
+    let bucket = "presigned-put-test";
+
+    // Setup: create bucket
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Generate pre-signed PUT URL
+    let presigning_config =
+        aws_sdk_s3::presigning::PresigningConfig::expires_in(std::time::Duration::from_secs(3600))
+            .expect("Failed to create presigning config");
+
+    let presigned_request = client
+        .put_object()
+        .bucket(bucket)
+        .key("uploaded-file.txt")
+        .presigned(presigning_config)
+        .await
+        .expect("Failed to generate pre-signed URL");
+
+    // Use reqwest to upload via pre-signed URL
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .put(presigned_request.uri())
+        .body("uploaded via pre-signed URL")
+        .send()
+        .await
+        .expect("Failed to upload via pre-signed URL");
+
+    assert_eq!(
+        response.status(),
+        200,
+        "Pre-signed PUT should return 200 OK"
+    );
+
+    // Verify object was created by fetching it with SDK
+    let get_response = client
+        .get_object()
+        .bucket(bucket)
+        .key("uploaded-file.txt")
+        .send()
+        .await
+        .expect("Failed to get uploaded object");
+
+    let body = get_response.body.collect().await.unwrap().into_bytes();
+    assert_eq!(body, Bytes::from("uploaded via pre-signed URL"));
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("uploaded-file.txt")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test expired pre-signed URL returns appropriate error
+#[tokio::test]
+#[ignore]
+async fn test_presigned_url_expired() {
+    let client = create_s3_client().await;
+    let bucket = "presigned-expired-test";
+
+    // Setup
+    let _ = client.create_bucket().bucket(bucket).send().await;
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .body(Bytes::from("content").into())
+        .send()
+        .await
+        .unwrap();
+
+    // Generate pre-signed URL with 1 second expiry
+    let presigning_config =
+        aws_sdk_s3::presigning::PresigningConfig::expires_in(std::time::Duration::from_secs(1))
+            .expect("Failed to create presigning config");
+
+    let presigned_request = client
+        .get_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .presigned(presigning_config)
+        .await
+        .unwrap();
+
+    // Wait for URL to expire
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // Try to use expired URL
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(presigned_request.uri())
+        .send()
+        .await
+        .expect("Request should complete");
+
+    // Should return 403 AccessDenied for expired URL
+    assert_eq!(
+        response.status(),
+        403,
+        "Expected 403 for expired URL, got {}",
+        response.status()
+    );
+
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("AccessDenied") || body.contains("expired") || body.contains("Request has expired"),
+        "Response should indicate expiration: {}",
+        body
+    );
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test pre-signed URL with invalid signature is rejected
+#[tokio::test]
+#[ignore]
+async fn test_presigned_url_invalid_signature() {
+    let client = create_s3_client().await;
+    let bucket = "presigned-invalid-sig-test";
+
+    // Setup
+    let _ = client.create_bucket().bucket(bucket).send().await;
+    client
+        .put_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .body(Bytes::from("content").into())
+        .send()
+        .await
+        .unwrap();
+
+    // Generate valid pre-signed URL
+    let presigning_config =
+        aws_sdk_s3::presigning::PresigningConfig::expires_in(std::time::Duration::from_secs(3600))
+            .expect("Failed to create presigning config");
+
+    let presigned_request = client
+        .get_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .presigned(presigning_config)
+        .await
+        .unwrap();
+
+    // Tamper with the signature in the URL
+    let tampered_url = presigned_request
+        .uri()
+        .to_string()
+        .replace("X-Amz-Signature=", "X-Amz-Signature=0000000000000000000000000000000000000000000000000000000000000000");
+
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(&tampered_url)
+        .send()
+        .await
+        .expect("Request should complete");
+
+    assert_eq!(
+        response.status(),
+        403,
+        "Should reject invalid signature with 403"
+    );
+
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("SignatureDoesNotMatch"),
+        "Response should indicate signature mismatch: {}",
+        body
+    );
+
+    // Cleanup
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key("test-file.txt")
+        .send()
+        .await
+        .ok();
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}
+
+/// Test pre-signed URL for non-existent object returns 404 (auth passes)
+#[tokio::test]
+#[ignore]
+async fn test_presigned_url_object_not_found() {
+    let client = create_s3_client().await;
+    let bucket = "presigned-notfound-test";
+
+    // Setup: create bucket only (no object)
+    let _ = client.create_bucket().bucket(bucket).send().await;
+
+    // Generate pre-signed URL for non-existent object
+    let presigning_config =
+        aws_sdk_s3::presigning::PresigningConfig::expires_in(std::time::Duration::from_secs(3600))
+            .expect("Failed to create presigning config");
+
+    let presigned_request = client
+        .get_object()
+        .bucket(bucket)
+        .key("nonexistent.txt")
+        .presigned(presigning_config)
+        .await
+        .unwrap();
+
+    let http_client = reqwest::Client::new();
+    let response = http_client
+        .get(presigned_request.uri())
+        .send()
+        .await
+        .expect("Request should complete");
+
+    // Auth should pass, but object lookup should fail with 404
+    assert_eq!(
+        response.status(),
+        404,
+        "Should return 404 for non-existent object"
+    );
+
+    // Cleanup
+    let _ = client.delete_bucket().bucket(bucket).send().await;
+}

@@ -1,0 +1,15 @@
+services:
+  s3:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "9000:9000"
+    volumes:
+      - ./data:/data
+    environment:
+      - LOCAL_S3_ACCESS_KEY=localadmin
+      - LOCAL_S3_SECRET_KEY=localadmin
+      - LOCAL_S3_REGION=us-east-1
+      - LOCAL_S3_REQUIRE_AUTH=${LOCAL_S3_REQUIRE_AUTH:-true}
+      - RUST_LOG=l3_object_storage=debug

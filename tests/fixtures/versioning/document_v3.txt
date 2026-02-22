@@ -1,0 +1,18 @@
+This is version 3 of the test document.
+Final revision for testing S3 object versioning functionality.
+
+Version History:
+- v1.0: Initial release
+- v2.0: Added new section
+- v3.0: Final revision with corrections
+
+Content: Lorem ipsum dolor sit amet, consectetur adipiscing elit.
+Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.
+Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.
+
+New Section Added in v2:
+This section was added in version 2 to demonstrate version differences.
+
+Final Section Added in v3:
+This is the final section added in version 3 to complete the document.
+All versions should remain accessible through S3 versioning API.

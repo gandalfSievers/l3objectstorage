@@ -1,0 +1,81 @@
+[package]
+name = "l3_object_storage"
+version = "0.1.0"
+edition = "2021"
+description = "A local S3-compatible object storage server"
+license = "MIT"
+authors = ["L3ObjectStorage Contributors"]
+
+[lib]
+name = "l3_object_storage"
+path = "src/lib.rs"
+
+[[bin]]
+name = "l3-object-storage"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = { version = "0.36", features = ["serialize"] }
+
+# Cryptography (for SigV4, ETag, etc.)
+ring = "0.17"
+hex = "0.4"
+base64 = "0.22"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Utilities
+uuid = { version = "1", features = ["v4"] }
+percent-encoding = "2"
+mime_guess = "2"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+
+# Async file I/O
+tokio-util = { version = "0.7", features = ["io"] }
+
+# Configuration
+dotenvy = "0.15"
+
+# CRC32 for EventStream checksums (AWS uses CRC-32, not CRC-32C)
+crc32fast = "1.4"
+
+[dev-dependencies]
+# Testing
+tokio-test = "0.4"
+tempfile = "3"
+pretty_assertions = "1"
+aws-config = "1"
+aws-sdk-s3 = "1"
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-smithy-types-convert = { version = "0.60", features = ["convert-streams"] }
+aws-sigv4 = "1"
+aws-smithy-runtime-api = "1"
+tokio-stream = "0.1"
+reqwest = { version = "0.12", features = ["json"] }
+http = "1"
+futures = "0.3"
+
+[features]
+# Enable tests that require auth to be disabled
+noauth_tests = []
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
