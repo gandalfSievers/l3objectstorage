@@ -56,6 +56,12 @@ pub async fn delete_objects(
             .await
         {
             Ok(result) => {
+                // Send notification for successful delete
+                storage.notify_event(
+                    bucket, "s3:ObjectRemoved:Delete", &obj.key,
+                    0, "", result.version_id.as_deref(),
+                ).await;
+
                 deleted.push(DeletedObject {
                     key: obj.key,
                     version_id: result.version_id,

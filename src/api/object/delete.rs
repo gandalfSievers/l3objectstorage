@@ -77,6 +77,12 @@ pub async fn delete_object_versioned_with_bypass(
 
     let result = storage.delete_object_versioned(bucket, key, version_id).await?;
 
+    // Send notification for successful delete
+    storage.notify_event(
+        bucket, "s3:ObjectRemoved:Delete", key,
+        0, "", result.version_id.as_deref(),
+    ).await;
+
     let mut response_builder = Response::builder().status(StatusCode::NO_CONTENT);
 
     // Add version ID header if present

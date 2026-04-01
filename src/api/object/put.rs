@@ -134,9 +134,16 @@ pub async fn put_object_conditional_with_metadata(
         .get_sse_algorithm_for_object(bucket, sse_header)
         .await?;
 
+    let data_len = data.len() as u64;
     let object = storage
         .put_object_versioned_with_sse(bucket, key, data, content_type.as_deref(), custom_metadata, sse_algorithm.as_ref())
         .await?;
+
+    // Send notification for successful put
+    storage.notify_event(
+        bucket, "s3:ObjectCreated:Put", key,
+        data_len, &object.etag, object.version_id.as_deref(),
+    ).await;
 
     // Apply canned ACL if specified
     if let Some(acl_header) = canned_acl {

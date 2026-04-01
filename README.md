@@ -17,7 +17,7 @@ L3 Object Storage provides a fully compatible Amazon S3 API implementation for l
 
 ## Features
 
-- **57 S3 API operations** implemented
+- **59 S3 API operations** implemented
 - **Bucket operations**: Create, delete, list, head, location, ACL, policy, CORS, tagging, versioning, lifecycle, encryption, website, ownership controls, public access block
 - **Object operations**: Put, get, head, delete, copy, list (v1/v2), tagging, ACL, attributes, rename
 - **Versioning**: Full support for object versions and delete markers
@@ -25,6 +25,7 @@ L3 Object Storage provides a fully compatible Amazon S3 API implementation for l
 - **Object Lock**: Legal hold, retention periods, compliance/governance modes
 - **S3 Select**: SQL queries on CSV/JSON data
 - **Authentication**: AWS Signature Version 4 (optional)
+- **Event notifications**: SNS/SQS dispatch on object events with prefix/suffix filters
 - **Pre-signed URLs**: GET, PUT, DELETE, HEAD with expiration
 - **Range requests**: Partial object retrieval (HTTP 206)
 - **Conditional requests**: If-Match, If-None-Match headers
@@ -101,12 +102,40 @@ let client = aws_sdk_s3::Client::new(&config);
 | `LOCAL_S3_REQUIRE_AUTH` | `false` | Require SigV4 authentication |
 | `LOCAL_S3_ENCRYPTION_KEY` | (none) | Master key for SSE-S3 (32 bytes, hex or base64) |
 | `LOCAL_S3_SHUTDOWN_TIMEOUT` | `30` | Graceful shutdown timeout (seconds) |
+| `LOCAL_S3_SNS_ENDPOINT` | (none) | SNS endpoint for event notifications |
+| `LOCAL_S3_SQS_ENDPOINT` | (none) | SQS endpoint for event notifications |
 | `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+
+## Event Notifications
+
+L3 Object Storage can dispatch S3 event notifications to SNS topics and SQS queues when objects are created, deleted, or copied. This mirrors the real AWS S3 event notification system.
+
+Supported events:
+- `s3:ObjectCreated:Put`
+- `s3:ObjectCreated:Copy`
+- `s3:ObjectCreated:CompleteMultipartUpload`
+- `s3:ObjectRemoved:Delete`
+
+Configure notification endpoints via environment variables, then use the standard S3 API to set up bucket notification configurations with optional prefix/suffix key filters.
+
+### Local Development Setup
+
+Use `docker-compose up` to start L3 with local SNS ([local-sns](https://github.com/jameskbride/local-sns)) and SQS ([ElasticMQ](https://github.com/softwaremill/elasticmq)) emulators:
+
+```bash
+docker-compose up -d
+```
+
+Or start the infrastructure for integration testing:
+
+```bash
+make docker-up    # starts S3 + SNS + SQS on a shared Docker network
+```
 
 ## Supported S3 Operations
 
-### Bucket Operations (34)
-CreateBucket, DeleteBucket, HeadBucket, ListBuckets, GetBucketLocation, GetBucketAcl, PutBucketAcl, GetBucketPolicy, PutBucketPolicy, DeleteBucketPolicy, GetBucketPolicyStatus, GetBucketCors, PutBucketCors, DeleteBucketCors, GetBucketTagging, PutBucketTagging, DeleteBucketTagging, GetBucketVersioning, PutBucketVersioning, GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration, DeleteBucketLifecycle, GetBucketWebsite, PutBucketWebsite, DeleteBucketWebsite, GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption, GetBucketOwnershipControls, PutBucketOwnershipControls, DeleteBucketOwnershipControls, GetPublicAccessBlock, PutPublicAccessBlock, DeletePublicAccessBlock
+### Bucket Operations (36)
+CreateBucket, DeleteBucket, HeadBucket, ListBuckets, GetBucketLocation, GetBucketAcl, PutBucketAcl, GetBucketPolicy, PutBucketPolicy, DeleteBucketPolicy, GetBucketPolicyStatus, GetBucketCors, PutBucketCors, DeleteBucketCors, GetBucketTagging, PutBucketTagging, DeleteBucketTagging, GetBucketVersioning, PutBucketVersioning, GetBucketLifecycleConfiguration, PutBucketLifecycleConfiguration, DeleteBucketLifecycle, GetBucketNotificationConfiguration, PutBucketNotificationConfiguration, GetBucketWebsite, PutBucketWebsite, DeleteBucketWebsite, GetBucketEncryption, PutBucketEncryption, DeleteBucketEncryption, GetBucketOwnershipControls, PutBucketOwnershipControls, DeleteBucketOwnershipControls, GetPublicAccessBlock, PutPublicAccessBlock, DeletePublicAccessBlock
 
 ### Object Operations (16)
 PutObject, GetObject, HeadObject, DeleteObject, DeleteObjects, CopyObject, ListObjects, ListObjectsV2, ListObjectVersions, GetObjectAcl, PutObjectAcl, GetObjectTagging, PutObjectTagging, DeleteObjectTagging, GetObjectAttributes, RenameObject
@@ -132,7 +161,7 @@ make test-all
 make test-integration
 ```
 
-**Test Coverage**: 355 unit tests + 134 AWS SDK integration tests
+**Test Coverage**: 373 unit tests + 212 AWS SDK integration tests
 
 ## Docker Images
 
@@ -157,6 +186,7 @@ L3ObjectStorage
 ├── HTTP Server (hyper + tokio)
 ├── S3 API Router
 ├── Auth Module (SigV4)
+├── Notification Dispatcher (SNS/SQS)
 └── Storage Engine (filesystem-based)
     ├── Bucket Manager
     ├── Object Manager

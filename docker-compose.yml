@@ -12,4 +12,25 @@ services:
       - LOCAL_S3_SECRET_KEY=localadmin
       - LOCAL_S3_REGION=us-east-1
       - LOCAL_S3_REQUIRE_AUTH=${LOCAL_S3_REQUIRE_AUTH:-true}
+      - LOCAL_S3_SNS_ENDPOINT=http://sns:9911
+      - LOCAL_S3_SQS_ENDPOINT=http://sqs:9324
       - RUST_LOG=l3_object_storage=debug
+    depends_on:
+      - sns
+      - sqs
+
+  sns:
+    image: jameskbride/local-sns
+    ports:
+      - "9911:9911"
+    environment:
+      - AWS_ACCOUNT_ID=000000000000
+    depends_on:
+      - sqs
+
+  sqs:
+    image: softwaremill/elasticmq-native
+    ports:
+      - "9324:9324"
+    volumes:
+      - ./docker/elasticmq.conf:/opt/elasticmq.conf

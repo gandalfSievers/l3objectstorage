@@ -6,7 +6,8 @@ use hyper::{Response, StatusCode};
 
 use crate::storage::StorageEngine;
 use crate::types::bucket::{
-    LambdaFunctionConfiguration, NotificationConfiguration, QueueConfiguration, TopicConfiguration,
+    FilterRule, LambdaFunctionConfiguration, NotificationConfiguration, NotificationFilter,
+    NotificationFilterKey, QueueConfiguration, TopicConfiguration,
 };
 use crate::types::error::{S3Error, S3ErrorCode, S3Result};
 
@@ -78,6 +79,7 @@ fn generate_notification_xml(config: &NotificationConfiguration) -> String {
         for event in &topic.events {
             xml.push_str(&format!("\n        <Event>{}</Event>", escape_xml(event)));
         }
+        xml.push_str(&generate_filter_xml(&topic.filter, "        "));
         xml.push_str("\n    </TopicConfiguration>");
     }
 
@@ -94,6 +96,7 @@ fn generate_notification_xml(config: &NotificationConfiguration) -> String {
         for event in &queue.events {
             xml.push_str(&format!("\n        <Event>{}</Event>", escape_xml(event)));
         }
+        xml.push_str(&generate_filter_xml(&queue.filter, "        "));
         xml.push_str("\n    </QueueConfiguration>");
     }
 
@@ -110,6 +113,7 @@ fn generate_notification_xml(config: &NotificationConfiguration) -> String {
         for event in &lambda.events {
             xml.push_str(&format!("\n        <Event>{}</Event>", escape_xml(event)));
         }
+        xml.push_str(&generate_filter_xml(&lambda.filter, "        "));
         xml.push_str("\n    </CloudFunctionConfiguration>");
     }
 
@@ -137,13 +141,14 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
             .or_else(|| extract_xml_value(&topic_content, "TopicArn"))
             .unwrap_or_default();
         let events = extract_all_xml_values(&topic_content, "Event");
+        let filter = parse_filter(&topic_content);
 
         if !topic_arn.is_empty() {
             config.topic_configurations.push(TopicConfiguration {
                 id,
                 topic_arn,
                 events,
-                filter: None,
+                filter,
             });
         }
 
@@ -163,13 +168,14 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
             .or_else(|| extract_xml_value(&queue_content, "QueueArn"))
             .unwrap_or_default();
         let events = extract_all_xml_values(&queue_content, "Event");
+        let filter = parse_filter(&queue_content);
 
         if !queue_arn.is_empty() {
             config.queue_configurations.push(QueueConfiguration {
                 id,
                 queue_arn,
                 events,
-                filter: None,
+                filter,
             });
         }
 
@@ -190,6 +196,8 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
             .unwrap_or_default();
         let events = extract_all_xml_values(&lambda_content, "Event");
 
+        let filter = parse_filter(&lambda_content);
+
         if !lambda_arn.is_empty() {
             config
                 .lambda_function_configurations
@@ -197,7 +205,7 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
                     id,
                     lambda_function_arn: lambda_arn,
                     events,
-                    filter: None,
+                    filter,
                 });
         }
 
@@ -218,6 +226,8 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
             .unwrap_or_default();
         let events = extract_all_xml_values(&lambda_content, "Event");
 
+        let filter = parse_filter(&lambda_content);
+
         if !lambda_arn.is_empty() {
             config
                 .lambda_function_configurations
@@ -225,7 +235,7 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
                     id,
                     lambda_function_arn: lambda_arn,
                     events,
-                    filter: None,
+                    filter,
                 });
         }
 
@@ -244,6 +254,57 @@ fn parse_notification_configuration(body: &[u8]) -> S3Result<NotificationConfigu
     }
 
     Ok(config)
+}
+
+/// Parse a `<Filter>` block from a configuration element's content.
+fn parse_filter(content: &str) -> Option<NotificationFilter> {
+    let filter_content = extract_xml_block(content, "Filter")?;
+    let s3key_content = extract_xml_block(&filter_content, "S3Key")?;
+
+    let mut filter_rules = Vec::new();
+    let mut remaining = s3key_content.as_str();
+    while let Some(rule_content) = extract_xml_block(remaining, "FilterRule") {
+        let name = extract_xml_value(&rule_content, "Name").unwrap_or_default();
+        let value = extract_xml_value(&rule_content, "Value").unwrap_or_default();
+        if !name.is_empty() {
+            filter_rules.push(FilterRule { name, value });
+        }
+        if let Some(end_idx) = remaining.find("</FilterRule>") {
+            remaining = &remaining[end_idx + 13..];
+        } else {
+            break;
+        }
+    }
+
+    if filter_rules.is_empty() {
+        None
+    } else {
+        Some(NotificationFilter {
+            key: Some(NotificationFilterKey { filter_rules }),
+        })
+    }
+}
+
+/// Generate XML for a `<Filter>` block.
+fn generate_filter_xml(filter: &Option<NotificationFilter>, indent: &str) -> String {
+    let filter = match filter {
+        Some(f) => f,
+        None => return String::new(),
+    };
+    let key = match &filter.key {
+        Some(k) if !k.filter_rules.is_empty() => k,
+        _ => return String::new(),
+    };
+
+    let mut xml = format!("\n{}<Filter>\n{}    <S3Key>", indent, indent);
+    for rule in &key.filter_rules {
+        xml.push_str(&format!(
+            "\n{}        <FilterRule>\n{}            <Name>{}</Name>\n{}            <Value>{}</Value>\n{}        </FilterRule>",
+            indent, indent, escape_xml(&rule.name), indent, escape_xml(&rule.value), indent
+        ));
+    }
+    xml.push_str(&format!("\n{}    </S3Key>\n{}</Filter>", indent, indent));
+    xml
 }
 
 /// Extract a block of XML content between tags

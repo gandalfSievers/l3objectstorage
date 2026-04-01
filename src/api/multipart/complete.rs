@@ -32,6 +32,12 @@ pub async fn complete_multipart_upload(
         .complete_multipart_upload_with_sse(bucket, key, upload_id, parts, sse_algorithm.as_ref())
         .await?;
 
+    // Send notification for successful multipart upload completion
+    storage.notify_event(
+        bucket, "s3:ObjectCreated:CompleteMultipartUpload", key,
+        obj.size, &obj.etag, obj.version_id.as_deref(),
+    ).await;
+
     let response_body = CompleteMultipartUploadResponse {
         location: format!("/{}/{}", bucket, key),
         bucket: bucket.to_string(),
@@ -211,7 +217,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         // Verify object was created
-        let (obj, data) = storage.get_object("test-bucket", "test-key").await.unwrap();
+        let (_obj, data) = storage.get_object("test-bucket", "test-key").await.unwrap();
         assert_eq!(data.as_ref(), b"part1part2");
     }
 }

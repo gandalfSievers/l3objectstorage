@@ -7,6 +7,7 @@ pub mod api;
 pub mod auth;
 pub mod config;
 pub mod crypto;
+pub mod notifications;
 pub mod server;
 pub mod storage;
 pub mod types;

@@ -6,6 +6,8 @@ use tokio::sync::RwLock;
 
 use crate::config::Config;
 use crate::crypto::SseContext;
+use crate::notifications::NotificationDispatcher;
+use crate::notifications::sender::NotificationSender;
 use crate::types::bucket::{AccessControlList, CannedAcl, SseAlgorithm, TagSet};
 use crate::types::response::CorsConfiguration;
 use crate::types::error::{S3Error, S3Result};
@@ -27,6 +29,8 @@ pub struct StorageEngine {
     multipart_store: Arc<MultipartStore>,
     /// Server-side encryption context (if encryption is enabled)
     sse_context: Option<Arc<SseContext>>,
+    /// Notification dispatcher for sending S3 event notifications
+    notification_dispatcher: Option<Arc<NotificationDispatcher>>,
 }
 
 impl StorageEngine {
@@ -58,6 +62,20 @@ impl StorageEngine {
             tracing::info!("Server-side encryption is DISABLED (no encryption key configured)");
         }
 
+        // Initialize notification dispatcher if any endpoint is configured
+        let notification_dispatcher = if config.sns_endpoint.is_some() || config.sqs_endpoint.is_some() {
+            let sender = NotificationSender::new(
+                config.sns_endpoint.clone(),
+                config.sqs_endpoint.clone(),
+            );
+            tracing::info!("Notification dispatcher is ENABLED (sns={:?}, sqs={:?})",
+                config.sns_endpoint, config.sqs_endpoint);
+            Some(Arc::new(NotificationDispatcher::new(sender, config.region.clone())))
+        } else {
+            tracing::info!("Notification dispatcher is DISABLED (no endpoints configured)");
+            None
+        };
+
         Ok(Self {
             config,
             bucket_store: Arc::new(RwLock::new(bucket_store)),
@@ -65,6 +83,7 @@ impl StorageEngine {
             metadata_store: Arc::new(metadata_store),
             multipart_store: Arc::new(multipart_store),
             sse_context,
+            notification_dispatcher,
         })
     }
 
@@ -86,6 +105,26 @@ impl StorageEngine {
     /// Get the SSE context (if available)
     pub fn sse_context(&self) -> Option<&Arc<SseContext>> {
         self.sse_context.as_ref()
+    }
+
+    /// Send an S3 event notification if a dispatcher is configured and the bucket
+    /// has a matching notification configuration. Errors are logged, never propagated.
+    pub async fn notify_event(
+        &self,
+        bucket: &str,
+        event_name: &str,
+        key: &str,
+        size: u64,
+        etag: &str,
+        version_id: Option<&str>,
+    ) {
+        if let Some(ref dispatcher) = self.notification_dispatcher {
+            if let Ok(config) = self.get_bucket_notification(bucket).await {
+                if config.is_configured() {
+                    dispatcher.dispatch(config, event_name, bucket, key, size, etag, version_id);
+                }
+            }
+        }
     }
 
     /// Determine the SSE algorithm to use for an object

@@ -1,5 +1,6 @@
 .PHONY: build test test-unit test-integration test-integration-noauth test-integration-quick \
-        test-integration-stress test-integration-concurrency test-mock test-all clean \
+        test-integration-stress test-integration-concurrency test-integration-notifications \
+        test-mock test-all clean \
         docker-build docker-build-debian docker-build-alpine docker-push docker-clean docker-test \
         docker-up docker-up-noauth docker-down docker-logs \
         help fmt lint run run-release
@@ -10,6 +11,9 @@ IMAGE_NAME := l3objectstorage
 REGISTRY_IMAGE := gandalfsievers/l3objectstorage
 TEST_CONTAINER := l3objectstorage-test
 TEST_PORT := 9999
+TEST_NETWORK := l3objectstorage-test-net
+SNS_CONTAINER := l3objectstorage-sns
+SQS_CONTAINER := l3objectstorage-sqs
 
 # Detect host architecture
 HOST_ARCH := $(shell uname -m)
@@ -42,6 +46,7 @@ help:
 	@echo "    make test-integration-quick - Run integration tests (skip stress/concurrency)"
 	@echo "    make test-integration-stress - Run stress tests (single-threaded)"
 	@echo "    make test-integration-concurrency - Run concurrency tests"
+	@echo "    make test-integration-notifications - Run notification trigger tests"
 	@echo "    make test-mock             - Run mock/offline tests (no server)"
 	@echo "    make test-all              - Run all tests (unit + integration)"
 	@echo ""
@@ -181,31 +186,55 @@ docker-clean:
 # Docker Run (for integration testing)
 # =============================================================================
 
-docker-up:
+docker-up: docker-up-infra
 	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
 	docker run -d --rm --name $(TEST_CONTAINER) \
+		--network $(TEST_NETWORK) \
 		-p $(TEST_PORT):9000 \
 		-v $$(pwd)/data:/data \
 		-e LOCAL_S3_REQUIRE_AUTH=true \
+		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
+		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
 		$(IMAGE_NAME):latest
 
-docker-up-noauth:
+docker-up-noauth: docker-up-infra
 	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
 	docker run -d --rm --name $(TEST_CONTAINER) \
+		--network $(TEST_NETWORK) \
 		-p $(TEST_PORT):9000 \
 		-v $$(pwd)/data:/data \
 		-e LOCAL_S3_REQUIRE_AUTH=false \
+		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
+		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
 		$(IMAGE_NAME):latest
 
-docker-up-alpine:
+docker-up-alpine: docker-up-infra
 	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
 	docker run -d --rm --name $(TEST_CONTAINER) \
+		--network $(TEST_NETWORK) \
 		-p $(TEST_PORT):9000 \
 		-v $$(pwd)/data:/data \
+		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
+		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
 		$(IMAGE_NAME):alpine
 
+docker-up-infra:
+	-docker network create $(TEST_NETWORK) 2>/dev/null || true
+	-docker rm -f $(SNS_CONTAINER) $(SQS_CONTAINER) 2>/dev/null
+	docker run -d --rm --name $(SQS_CONTAINER) \
+		--network $(TEST_NETWORK) --network-alias sqs \
+		-p 9324:9324 \
+		-v $$(pwd)/docker/elasticmq.conf:/opt/elasticmq.conf \
+		softwaremill/elasticmq-native
+	docker run -d --rm --name $(SNS_CONTAINER) \
+		--network $(TEST_NETWORK) --network-alias sns \
+		-p 9911:9911 \
+		-e AWS_ACCOUNT_ID=000000000000 \
+		jameskbride/local-sns
+
 docker-down:
-	-docker stop $(TEST_CONTAINER) 2>/dev/null
+	-docker stop $(TEST_CONTAINER) $(SNS_CONTAINER) $(SQS_CONTAINER) 2>/dev/null
+	-docker network rm $(TEST_NETWORK) 2>/dev/null
 
 docker-logs:
 	docker logs -f $(TEST_CONTAINER)
@@ -255,6 +284,12 @@ test-integration-concurrency: docker-build-debian docker-up wait-ready
 	cargo test --test aws_sdk_tests concurrent -- --ignored
 	@$(MAKE) docker-down
 
+# Notification trigger tests (requires SNS + SQS containers)
+test-integration-notifications: docker-build-debian docker-up wait-ready
+	@echo "Running notification trigger tests..."
+	cargo test --test aws_sdk_tests notification_trigger -- --ignored --nocapture
+	@$(MAKE) docker-down
+
 # Mock/offline tests (no server required)
 test-mock:
 	@echo "Running mock/offline tests..."
@@ -280,6 +315,24 @@ wait-ready:
 		$(MAKE) docker-down; \
 		exit 1; \
 	fi
+	@echo "Waiting for SNS on port 9911..."
+	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+		if nc -z localhost 9911 2>/dev/null; then \
+			echo "SNS is ready!"; \
+			break; \
+		fi; \
+		echo "Waiting for SNS... ($$i/15)"; \
+		sleep 1; \
+	done
+	@echo "Waiting for SQS on port 9324..."
+	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+		if nc -z localhost 9324 2>/dev/null; then \
+			echo "SQS is ready!"; \
+			break; \
+		fi; \
+		echo "Waiting for SQS... ($$i/15)"; \
+		sleep 1; \
+	done
 
 # =============================================================================
 # Development helpers

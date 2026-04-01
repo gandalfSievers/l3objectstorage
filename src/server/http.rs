@@ -926,6 +926,12 @@ async fn copy_object(
         )
         .await?;
 
+    // Send notification for successful copy
+    storage.notify_event(
+        dest_bucket, "s3:ObjectCreated:Copy", dest_key,
+        obj.size, &obj.etag, obj.version_id.as_deref(),
+    ).await;
+
     // Build CopyObjectResult XML response
     let xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\

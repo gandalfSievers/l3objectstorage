@@ -930,7 +930,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_bucket_paths() {
-        let (store, temp) = create_test_store().await;
+        let (store, _temp) = create_test_store().await;
 
         let objects_path = store.objects_path("my-bucket");
         let metadata_path = store.metadata_path("my-bucket");

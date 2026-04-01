@@ -27,6 +27,12 @@ pub struct Config {
     /// Graceful shutdown timeout - how long to wait for in-flight requests
     /// Set via LOCAL_S3_SHUTDOWN_TIMEOUT env var (seconds)
     pub shutdown_timeout: Duration,
+    /// SNS endpoint for sending notification events
+    /// Set via LOCAL_S3_SNS_ENDPOINT env var
+    pub sns_endpoint: Option<String>,
+    /// SQS endpoint for sending notification events
+    /// Set via LOCAL_S3_SQS_ENDPOINT env var
+    pub sqs_endpoint: Option<String>,
 }
 
 impl Config {
@@ -71,6 +77,9 @@ impl Config {
             })
             .filter(|k| k.len() == 32); // Must be 256 bits (32 bytes)
 
+        let sns_endpoint = std::env::var("LOCAL_S3_SNS_ENDPOINT").ok();
+        let sqs_endpoint = std::env::var("LOCAL_S3_SQS_ENDPOINT").ok();
+
         // Parse shutdown timeout (default 30 seconds)
         let shutdown_timeout = std::env::var("LOCAL_S3_SHUTDOWN_TIMEOUT")
             .ok()
@@ -88,6 +97,8 @@ impl Config {
             require_auth,
             encryption_key,
             shutdown_timeout,
+            sns_endpoint,
+            sqs_endpoint,
         })
     }
 
@@ -103,6 +114,8 @@ impl Config {
             require_auth: false,
             encryption_key: None,
             shutdown_timeout: Duration::from_secs(30),
+            sns_endpoint: None,
+            sqs_endpoint: None,
         }
     }
 
@@ -152,6 +165,18 @@ impl Config {
     /// Set the graceful shutdown timeout
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Set the SNS endpoint URL
+    pub fn with_sns_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.sns_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Set the SQS endpoint URL
+    pub fn with_sqs_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.sqs_endpoint = Some(endpoint.into());
         self
     }
 
