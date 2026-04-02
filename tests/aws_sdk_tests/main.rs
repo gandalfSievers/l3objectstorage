@@ -14,8 +14,18 @@ pub use aws_sdk_s3::Client;
 pub use bytes::Bytes;
 
 pub async fn create_s3_client() -> Client {
-    let endpoint = std::env::var("TEST_ENDPOINT_URL")
-        .unwrap_or_else(|_| "http://localhost:9999".to_string());
+    let force_path_style = std::env::var("TEST_FORCE_PATH_STYLE")
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
+
+    let endpoint = if force_path_style {
+        std::env::var("TEST_ENDPOINT_URL")
+            .unwrap_or_else(|_| "http://localhost:9999".to_string())
+    } else {
+        std::env::var("TEST_VHOST_ENDPOINT_URL")
+            .unwrap_or_else(|_| "http://s3.local:9000".to_string())
+    };
+
     let config = aws_config::defaults(BehaviorVersion::latest())
         .endpoint_url(&endpoint)
         .region(aws_config::Region::new("us-east-1"))
@@ -30,7 +40,7 @@ pub async fn create_s3_client() -> Client {
         .await;
 
     let s3_config = aws_sdk_s3::config::Builder::from(&config)
-        .force_path_style(true)
+        .force_path_style(force_path_style)
         .build();
 
     Client::from_conf(s3_config)

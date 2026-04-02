@@ -36,7 +36,12 @@ async fn test_virtual_hosted_style_put_get_delete() {
 
     // Use a path-style client to create the bucket first
     let path_client = create_s3_client().await;
-    let _ = path_client.create_bucket().bucket(bucket).send().await;
+    path_client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to create bucket for vhost test");
 
     // Use the virtual hosted-style client for object operations
     let client = create_vhost_client().await;
@@ -122,7 +127,12 @@ async fn test_virtual_hosted_style_nested_key() {
     let bucket = "vhost-test-bucket";
 
     let path_client = create_s3_client().await;
-    let _ = path_client.create_bucket().bucket(bucket).send().await;
+    path_client
+        .create_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .expect("Failed to create bucket for vhost test");
 
     let client = create_vhost_client().await;
 

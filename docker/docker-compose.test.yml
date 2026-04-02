@@ -1,0 +1,66 @@
+services:
+  s3:
+    image: ${S3_IMAGE:-l3objectstorage:latest}
+    container_name: l3objectstorage-test
+    networks:
+      testnet:
+        ipv4_address: 172.30.0.10
+        aliases:
+          - s3.local
+          - vhost-test-bucket.s3.local
+    ports:
+      - "${TEST_PORT:-9999}:9000"
+    volumes:
+      - ../../data:/data
+    environment:
+      - LOCAL_S3_REQUIRE_AUTH=${LOCAL_S3_REQUIRE_AUTH:-true}
+      - LOCAL_S3_DOMAIN=s3.local
+      - LOCAL_S3_SNS_ENDPOINT=http://sns:9911
+      - LOCAL_S3_SQS_ENDPOINT=http://sqs:9324
+      - RUST_LOG=l3_object_storage=debug
+    depends_on:
+      - sns
+      - sqs
+      - dns
+
+  sns:
+    image: jameskbride/local-sns
+    container_name: l3objectstorage-sns
+    networks:
+      testnet:
+    ports:
+      - "9911:9911"
+    environment:
+      - AWS_ACCOUNT_ID=000000000000
+    depends_on:
+      - sqs
+
+  sqs:
+    image: softwaremill/elasticmq-native
+    container_name: l3objectstorage-sqs
+    networks:
+      testnet:
+    ports:
+      - "9324:9324"
+    volumes:
+      - ./elasticmq.conf:/opt/elasticmq.conf
+
+  dns:
+    image: alpine
+    container_name: l3objectstorage-dns
+    networks:
+      testnet:
+        ipv4_address: 172.30.0.53
+    volumes:
+      - ./dnsmasq-vhost.conf:/etc/dnsmasq.conf
+    cap_add:
+      - NET_ADMIN
+    command: sh -c "apk add --no-cache dnsmasq && dnsmasq -k"
+
+networks:
+  testnet:
+    name: l3objectstorage-test-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/16

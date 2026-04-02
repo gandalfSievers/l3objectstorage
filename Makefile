@@ -9,11 +9,9 @@
 VERSION := $(shell cat VERSION 2>/dev/null || echo "0.1.0")
 IMAGE_NAME := l3objectstorage
 REGISTRY_IMAGE := gandalfsievers/l3objectstorage
-TEST_CONTAINER := l3objectstorage-test
 TEST_PORT := 9999
-TEST_NETWORK := l3objectstorage-test-net
-SNS_CONTAINER := l3objectstorage-sns
-SQS_CONTAINER := l3objectstorage-sqs
+TEST_COMPOSE := docker compose -f docker/docker-compose.test.yml
+TEST_COMPOSE_VHOST := $(TEST_COMPOSE) -f docker/docker-compose.test.vhost.yml
 
 # Detect host architecture
 HOST_ARCH := $(shell uname -m)
@@ -187,64 +185,21 @@ docker-clean:
 # Docker Run (for integration testing)
 # =============================================================================
 
-docker-up: docker-up-infra
-	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
-	docker run -d --rm --name $(TEST_CONTAINER) \
-		--network $(TEST_NETWORK) \
-		--network-alias s3.local \
-		--network-alias vhost-test-bucket.s3.local \
-		-p $(TEST_PORT):9000 \
-		-v $$(pwd)/data:/data \
-		-e LOCAL_S3_REQUIRE_AUTH=true \
-		-e LOCAL_S3_DOMAIN=s3.local \
-		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
-		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
-		$(IMAGE_NAME):latest
+docker-up:
+	$(TEST_COMPOSE) up -d
 
-docker-up-noauth: docker-up-infra
-	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
-	docker run -d --rm --name $(TEST_CONTAINER) \
-		--network $(TEST_NETWORK) \
-		--network-alias s3.local \
-		--network-alias vhost-test-bucket.s3.local \
-		-p $(TEST_PORT):9000 \
-		-v $$(pwd)/data:/data \
-		-e LOCAL_S3_REQUIRE_AUTH=false \
-		-e LOCAL_S3_DOMAIN=s3.local \
-		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
-		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
-		$(IMAGE_NAME):latest
+docker-up-noauth:
+	LOCAL_S3_REQUIRE_AUTH=false $(TEST_COMPOSE) up -d
 
-docker-up-alpine: docker-up-infra
-	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
-	docker run -d --rm --name $(TEST_CONTAINER) \
-		--network $(TEST_NETWORK) \
-		-p $(TEST_PORT):9000 \
-		-v $$(pwd)/data:/data \
-		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
-		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
-		$(IMAGE_NAME):alpine
-
-docker-up-infra:
-	-docker network create $(TEST_NETWORK) 2>/dev/null || true
-	-docker rm -f $(SNS_CONTAINER) $(SQS_CONTAINER) 2>/dev/null
-	docker run -d --rm --name $(SQS_CONTAINER) \
-		--network $(TEST_NETWORK) --network-alias sqs \
-		-p 9324:9324 \
-		-v $$(pwd)/docker/elasticmq.conf:/opt/elasticmq.conf \
-		softwaremill/elasticmq-native
-	docker run -d --rm --name $(SNS_CONTAINER) \
-		--network $(TEST_NETWORK) --network-alias sns \
-		-p 9911:9911 \
-		-e AWS_ACCOUNT_ID=000000000000 \
-		jameskbride/local-sns
+docker-up-alpine:
+	S3_IMAGE=$(IMAGE_NAME):alpine $(TEST_COMPOSE) up -d
 
 docker-down:
-	-docker stop $(TEST_CONTAINER) $(SNS_CONTAINER) $(SQS_CONTAINER) 2>/dev/null
-	-docker network rm $(TEST_NETWORK) 2>/dev/null
+	-$(TEST_COMPOSE_VHOST) down --remove-orphans 2>/dev/null
+	-$(TEST_COMPOSE) down --remove-orphans 2>/dev/null
 
 docker-logs:
-	docker logs -f $(TEST_CONTAINER)
+	$(TEST_COMPOSE) logs -f s3
 
 docker-restart: docker-down docker-up
 
@@ -262,11 +217,15 @@ test-unit:
 # Virtual hosted-style tests are excluded (need Docker network); run via test-integration-vhost
 # Notification trigger tests are excluded (need single-threaded); run via test-integration-notifications
 test-integration: docker-build-debian docker-up wait-ready
-	@echo "Running AWS SDK integration tests (auth enabled)..."
-	cargo test --test aws_sdk_tests -- --ignored --nocapture --skip virtual_host --skip notification_trigger
-	@echo "Running notification trigger tests (single-threaded)..."
-	cargo test --test aws_sdk_tests notification_trigger -- --ignored --nocapture --test-threads=1
-	@$(MAKE) docker-down
+	@echo "=========================================="
+	@echo "  PATH-STYLE integration tests"
+	@echo "=========================================="
+	@exit_code=0; \
+	cargo test --test aws_sdk_tests -- --ignored --nocapture --skip virtual_host --skip notification_trigger || exit_code=$$?; \
+	echo "Running notification trigger tests (single-threaded)..."; \
+	cargo test --test aws_sdk_tests notification_trigger -- --ignored --nocapture --test-threads=1 || exit_code=$$?; \
+	$(MAKE) docker-down; \
+	exit $$exit_code
 
 # Integration tests with auth disabled (for anonymous access tests)
 test-integration-noauth: docker-build-debian docker-up-noauth wait-ready
@@ -274,8 +233,13 @@ test-integration-noauth: docker-build-debian docker-up-noauth wait-ready
 	cargo test --test aws_sdk_tests --features noauth_tests -- --ignored --nocapture
 	@$(MAKE) docker-down
 
-# All tests
-test-all: test-unit test-integration test-integration-vhost
+# All tests (unit + path-style integration with notifications + vhost integration)
+test-all:
+	@exit_code=0; \
+	$(MAKE) test-unit || exit_code=$$?; \
+	$(MAKE) test-integration || exit_code=$$?; \
+	$(MAKE) test-integration-vhost || exit_code=$$?; \
+	exit $$exit_code
 
 # Quick integration tests (skip stress and concurrency)
 test-integration-quick: docker-build-debian docker-up wait-ready
@@ -295,20 +259,17 @@ test-integration-concurrency: docker-build-debian docker-up wait-ready
 	cargo test --test aws_sdk_tests concurrent -- --ignored
 	@$(MAKE) docker-down
 
-# Virtual hosted-style tests (runs inside Docker network for alias resolution)
+# Virtual hosted-style tests (runs full suite inside Docker network with vhost addressing)
+# Notification trigger tests are excluded (they hardcode localhost for SNS/SQS endpoints)
 test-integration-vhost: docker-build-debian docker-up wait-ready
-	@echo "Running virtual hosted-style tests inside Docker network..."
-	docker run --rm \
-		--network $(TEST_NETWORK) \
-		-v $$(pwd):/workspace \
-		-v l3-cargo-registry:/usr/local/cargo/registry \
-		-v l3-cargo-target:/workspace/target \
-		-w /workspace \
-		-e TEST_ENDPOINT_URL=http://$(TEST_CONTAINER):9000 \
-		-e TEST_VHOST_ENDPOINT_URL=http://s3.local:9000 \
-		rust:latest \
-		cargo test --test aws_sdk_tests virtual_host -- --ignored --nocapture
-	@$(MAKE) docker-down
+	@echo "=========================================="
+	@echo "  VIRTUAL HOSTED-STYLE integration tests"
+	@echo "=========================================="
+	@exit_code=0; \
+	$(TEST_COMPOSE_VHOST) run --rm test-runner \
+		cargo test --test aws_sdk_tests -- --ignored --nocapture --skip notification_trigger --skip virtual_host || exit_code=$$?; \
+	$(MAKE) docker-down; \
+	exit $$exit_code
 
 # Notification trigger tests (requires SNS + SQS containers)
 test-integration-notifications: docker-build-debian docker-up wait-ready
