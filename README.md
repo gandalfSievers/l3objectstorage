@@ -29,6 +29,7 @@ L3 Object Storage provides a fully compatible Amazon S3 API implementation for l
 - **Pre-signed URLs**: GET, PUT, DELETE, HEAD with expiration
 - **Range requests**: Partial object retrieval (HTTP 206)
 - **Conditional requests**: If-Match, If-None-Match headers
+- **Virtual hosted-style**: Optional `<bucket>.domain` addressing alongside path-style
 
 ## Quick Start
 
@@ -104,7 +105,81 @@ let client = aws_sdk_s3::Client::new(&config);
 | `LOCAL_S3_SHUTDOWN_TIMEOUT` | `30` | Graceful shutdown timeout (seconds) |
 | `LOCAL_S3_SNS_ENDPOINT` | (none) | SNS endpoint for event notifications |
 | `LOCAL_S3_SQS_ENDPOINT` | (none) | SQS endpoint for event notifications |
+| `LOCAL_S3_DOMAIN` | (none) | Base domain for virtual hosted-style addressing (e.g., `s3.local`) |
 | `RUST_LOG` | `info` | Log level (`debug`, `info`, `warn`, `error`) |
+
+## Virtual Hosted-Style Addressing
+
+By default, L3 uses **path-style** requests (`http://localhost:9000/my-bucket/my-key`). You can also enable **virtual hosted-style** addressing where the bucket name is part of the hostname (`http://my-bucket.s3.local:9000/my-key`).
+
+### Setup
+
+Set the `LOCAL_S3_DOMAIN` environment variable to your chosen base domain:
+
+```bash
+docker run -d \
+  -p 9000:9000 \
+  -e LOCAL_S3_DOMAIN=s3.local \
+  l3objectstorage:latest
+```
+
+With this configured, requests to `<bucket>.s3.local:9000` will extract the bucket from the hostname. Path-style requests continue to work as a fallback.
+
+### DNS Resolution
+
+The hostname `<bucket>.s3.local` must resolve to your L3 server. Options:
+
+- **Docker Compose**: Add network aliases for each bucket (see `docker-compose.yml` for an example)
+- **Local `/etc/hosts`**: Add entries like `127.0.0.1 my-bucket.s3.local`
+- **dnsmasq / local DNS**: Wildcard `*.s3.local` to `127.0.0.1`
+
+### AWS SDK Example
+
+```rust
+let config = aws_config::defaults(BehaviorVersion::latest())
+    .endpoint_url("http://s3.local:9000")
+    .region("us-east-1")
+    .credentials_provider(Credentials::new("localadmin", "localadmin", None, None, "static"))
+    .load()
+    .await;
+
+// Use force_path_style(false) to enable virtual hosted-style
+let s3_config = aws_sdk_s3::config::Builder::from(&config)
+    .force_path_style(false)
+    .build();
+
+let client = aws_sdk_s3::Client::from_conf(s3_config);
+
+// Requests will go to http://my-bucket.s3.local:9000/my-key
+client.put_object()
+    .bucket("my-bucket")
+    .key("my-key")
+    .body(ByteStream::from(b"hello".to_vec()))
+    .send()
+    .await?;
+```
+
+### Docker Compose Example
+
+```yaml
+services:
+  s3:
+    image: l3objectstorage:latest
+    ports:
+      - "9000:9000"
+    environment:
+      - LOCAL_S3_DOMAIN=s3.local
+    networks:
+      default:
+        aliases:
+          - s3.local
+          - my-bucket.s3.local
+
+  my-app:
+    # your app container can reach s3 at http://my-bucket.s3.local:9000
+    environment:
+      - AWS_ENDPOINT_URL=http://s3.local:9000
+```
 
 ## Event Notifications
 

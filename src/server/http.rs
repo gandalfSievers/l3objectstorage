@@ -50,6 +50,9 @@ impl Server {
         } else {
             tracing::info!("Authentication is DISABLED (anonymous access allowed)");
         }
+        if let Some(ref domain) = self.config.domain {
+            tracing::info!("Virtual hosted-style enabled for domain: {}", domain);
+        }
 
         loop {
             let (stream, remote_addr) = listener.accept().await?;
@@ -93,6 +96,9 @@ impl Server {
             tracing::info!("Authentication is ENABLED");
         } else {
             tracing::info!("Authentication is DISABLED (anonymous access allowed)");
+        }
+        if let Some(ref domain) = self.config.domain {
+            tracing::info!("Virtual hosted-style enabled for domain: {}", domain);
         }
 
         // Track active connections
@@ -257,14 +263,44 @@ async fn handle_request(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    // Extract Host header for virtual hosted-style bucket detection
+    let host_header = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
     // Parse query string for special operations
     let query = uri.query().unwrap_or("");
     let query_params = parse_query(query);
 
     tracing::debug!("{} {}", method, path);
 
-    // Parse bucket and key from path
-    let (bucket, key) = parse_path(&path);
+    // Try virtual hosted-style: extract bucket from Host header if domain is configured
+    let vhost_bucket = host_header
+        .as_deref()
+        .and_then(|host| {
+            config
+                .domain
+                .as_deref()
+                .and_then(|domain| extract_bucket_from_host(host, domain))
+        })
+        .map(String::from);
+
+    // Parse bucket and key from path or use virtual hosted-style bucket
+    let (bucket, key) = if let Some(ref vhost_bucket) = vhost_bucket {
+        // Virtual hosted-style: bucket from Host, entire path is the key
+        tracing::debug!(
+            "Virtual hosted-style request: bucket={}, host={:?}",
+            vhost_bucket,
+            host_header
+        );
+        let key_path = path.trim_start_matches('/');
+        let key: Option<&str> = if key_path.is_empty() { None } else { Some(key_path) };
+        (Some(vhost_bucket.as_str()), key)
+    } else {
+        parse_path(&path)
+    };
 
     // Collect the request body
     let body = match req.collect().await {
@@ -860,6 +896,23 @@ async fn handle_request(
     }
 }
 
+/// Extract bucket from the Host header for virtual hosted-style requests.
+///
+/// Returns `Some(bucket_name)` if the Host matches `<bucket>.<domain>`,
+/// otherwise `None` (fall back to path-style).
+fn extract_bucket_from_host<'a>(host: &'a str, domain: &str) -> Option<&'a str> {
+    // Strip port from host if present (e.g., "mybucket.s3.local:9000" -> "mybucket.s3.local")
+    let host_without_port = host.split(':').next().unwrap_or(host);
+
+    let suffix = format!(".{}", domain);
+    if let Some(bucket) = host_without_port.strip_suffix(&suffix) {
+        if !bucket.is_empty() {
+            return Some(bucket);
+        }
+    }
+    None
+}
+
 /// Parse bucket and key from the request path
 fn parse_path(path: &str) -> (Option<&str>, Option<&str>) {
     let path = path.trim_start_matches('/');
@@ -1191,5 +1244,35 @@ mod tests {
             parse_path("/bucket/key%20with%20spaces"),
             (Some("bucket"), Some("key%20with%20spaces"))
         );
+    }
+
+    #[test]
+    fn test_extract_bucket_from_host_virtual_hosted() {
+        assert_eq!(
+            extract_bucket_from_host("mybucket.s3.local", "s3.local"),
+            Some("mybucket")
+        );
+        assert_eq!(
+            extract_bucket_from_host("mybucket.s3.local:9000", "s3.local"),
+            Some("mybucket")
+        );
+        assert_eq!(
+            extract_bucket_from_host("my-bucket.s3.local:9000", "s3.local"),
+            Some("my-bucket")
+        );
+    }
+
+    #[test]
+    fn test_extract_bucket_from_host_no_match() {
+        // Host is the domain itself (no bucket prefix)
+        assert_eq!(extract_bucket_from_host("s3.local", "s3.local"), None);
+        assert_eq!(extract_bucket_from_host("s3.local:9000", "s3.local"), None);
+        // Host doesn't match domain at all
+        assert_eq!(
+            extract_bucket_from_host("localhost:9000", "s3.local"),
+            None
+        );
+        // No domain configured
+        assert_eq!(extract_bucket_from_host("mybucket.s3.local", "other.domain"), None);
     }
 }

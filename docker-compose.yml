@@ -14,7 +14,13 @@ services:
       - LOCAL_S3_REQUIRE_AUTH=${LOCAL_S3_REQUIRE_AUTH:-true}
       - LOCAL_S3_SNS_ENDPOINT=http://sns:9911
       - LOCAL_S3_SQS_ENDPOINT=http://sqs:9324
+      - LOCAL_S3_DOMAIN=s3.local
       - RUST_LOG=l3_object_storage=debug
+    networks:
+      default:
+        aliases:
+          - s3.local
+          - vhost-test-bucket.s3.local
     depends_on:
       - sns
       - sqs

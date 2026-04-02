@@ -1,6 +1,6 @@
 .PHONY: build test test-unit test-integration test-integration-noauth test-integration-quick \
         test-integration-stress test-integration-concurrency test-integration-notifications \
-        test-mock test-all clean \
+        test-integration-vhost test-mock test-all clean \
         docker-build docker-build-debian docker-build-alpine docker-push docker-clean docker-test \
         docker-up docker-up-noauth docker-down docker-logs \
         help fmt lint run run-release
@@ -47,6 +47,7 @@ help:
 	@echo "    make test-integration-stress - Run stress tests (single-threaded)"
 	@echo "    make test-integration-concurrency - Run concurrency tests"
 	@echo "    make test-integration-notifications - Run notification trigger tests"
+	@echo "    make test-integration-vhost - Run virtual hosted-style tests (in Docker)"
 	@echo "    make test-mock             - Run mock/offline tests (no server)"
 	@echo "    make test-all              - Run all tests (unit + integration)"
 	@echo ""
@@ -190,9 +191,12 @@ docker-up: docker-up-infra
 	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
 	docker run -d --rm --name $(TEST_CONTAINER) \
 		--network $(TEST_NETWORK) \
+		--network-alias s3.local \
+		--network-alias vhost-test-bucket.s3.local \
 		-p $(TEST_PORT):9000 \
 		-v $$(pwd)/data:/data \
 		-e LOCAL_S3_REQUIRE_AUTH=true \
+		-e LOCAL_S3_DOMAIN=s3.local \
 		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
 		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
 		$(IMAGE_NAME):latest
@@ -201,9 +205,12 @@ docker-up-noauth: docker-up-infra
 	-docker rm -f $(TEST_CONTAINER) 2>/dev/null
 	docker run -d --rm --name $(TEST_CONTAINER) \
 		--network $(TEST_NETWORK) \
+		--network-alias s3.local \
+		--network-alias vhost-test-bucket.s3.local \
 		-p $(TEST_PORT):9000 \
 		-v $$(pwd)/data:/data \
 		-e LOCAL_S3_REQUIRE_AUTH=false \
+		-e LOCAL_S3_DOMAIN=s3.local \
 		-e LOCAL_S3_SNS_ENDPOINT=http://sns:9911 \
 		-e LOCAL_S3_SQS_ENDPOINT=http://sqs:9324 \
 		$(IMAGE_NAME):latest
@@ -252,9 +259,13 @@ test-unit:
 	cargo test
 
 # Integration tests (requires Docker, auth enabled)
+# Virtual hosted-style tests are excluded (need Docker network); run via test-integration-vhost
+# Notification trigger tests are excluded (need single-threaded); run via test-integration-notifications
 test-integration: docker-build-debian docker-up wait-ready
 	@echo "Running AWS SDK integration tests (auth enabled)..."
-	cargo test --test aws_sdk_tests -- --ignored --nocapture
+	cargo test --test aws_sdk_tests -- --ignored --nocapture --skip virtual_host --skip notification_trigger
+	@echo "Running notification trigger tests (single-threaded)..."
+	cargo test --test aws_sdk_tests notification_trigger -- --ignored --nocapture --test-threads=1
 	@$(MAKE) docker-down
 
 # Integration tests with auth disabled (for anonymous access tests)
@@ -264,7 +275,7 @@ test-integration-noauth: docker-build-debian docker-up-noauth wait-ready
 	@$(MAKE) docker-down
 
 # All tests
-test-all: test-unit test-integration
+test-all: test-unit test-integration test-integration-vhost
 
 # Quick integration tests (skip stress and concurrency)
 test-integration-quick: docker-build-debian docker-up wait-ready
@@ -282,6 +293,21 @@ test-integration-stress: docker-build-debian docker-up wait-ready
 test-integration-concurrency: docker-build-debian docker-up wait-ready
 	@echo "Running concurrency tests..."
 	cargo test --test aws_sdk_tests concurrent -- --ignored
+	@$(MAKE) docker-down
+
+# Virtual hosted-style tests (runs inside Docker network for alias resolution)
+test-integration-vhost: docker-build-debian docker-up wait-ready
+	@echo "Running virtual hosted-style tests inside Docker network..."
+	docker run --rm \
+		--network $(TEST_NETWORK) \
+		-v $$(pwd):/workspace \
+		-v l3-cargo-registry:/usr/local/cargo/registry \
+		-v l3-cargo-target:/workspace/target \
+		-w /workspace \
+		-e TEST_ENDPOINT_URL=http://$(TEST_CONTAINER):9000 \
+		-e TEST_VHOST_ENDPOINT_URL=http://s3.local:9000 \
+		rust:latest \
+		cargo test --test aws_sdk_tests virtual_host -- --ignored --nocapture
 	@$(MAKE) docker-down
 
 # Notification trigger tests (requires SNS + SQS containers)

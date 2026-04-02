@@ -33,6 +33,10 @@ pub struct Config {
     /// SQS endpoint for sending notification events
     /// Set via LOCAL_S3_SQS_ENDPOINT env var
     pub sqs_endpoint: Option<String>,
+    /// Base domain for virtual hosted-style bucket addressing
+    /// When set, requests to `<bucket>.<domain>` will extract the bucket from the Host header
+    /// Set via LOCAL_S3_DOMAIN env var (e.g., "s3.local")
+    pub domain: Option<String>,
 }
 
 impl Config {
@@ -79,6 +83,7 @@ impl Config {
 
         let sns_endpoint = std::env::var("LOCAL_S3_SNS_ENDPOINT").ok();
         let sqs_endpoint = std::env::var("LOCAL_S3_SQS_ENDPOINT").ok();
+        let domain = std::env::var("LOCAL_S3_DOMAIN").ok();
 
         // Parse shutdown timeout (default 30 seconds)
         let shutdown_timeout = std::env::var("LOCAL_S3_SHUTDOWN_TIMEOUT")
@@ -99,6 +104,7 @@ impl Config {
             shutdown_timeout,
             sns_endpoint,
             sqs_endpoint,
+            domain,
         })
     }
 
@@ -116,6 +122,7 @@ impl Config {
             shutdown_timeout: Duration::from_secs(30),
             sns_endpoint: None,
             sqs_endpoint: None,
+            domain: None,
         }
     }
 
@@ -177,6 +184,12 @@ impl Config {
     /// Set the SQS endpoint URL
     pub fn with_sqs_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.sqs_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Set the base domain for virtual hosted-style bucket addressing
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
         self
     }
 

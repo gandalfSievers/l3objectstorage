@@ -70,3 +70,4 @@ mod stress;
 mod protocol;
 mod performance;
 mod notification_trigger;
+mod virtual_host;
