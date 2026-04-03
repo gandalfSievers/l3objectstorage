@@ -1,17 +1,18 @@
 .PHONY: build test test-unit test-integration test-integration-noauth test-integration-quick \
         test-integration-stress test-integration-concurrency test-integration-notifications \
-        test-integration-vhost test-mock test-all clean \
+        test-integration-vhost test-integration-awsstyle test-mock test-all clean \
         docker-build docker-build-debian docker-build-alpine docker-push docker-clean docker-test \
         docker-up docker-up-noauth docker-down docker-logs \
         help fmt lint run run-release
 
-# Read version from VERSION file
-VERSION := $(shell cat VERSION 2>/dev/null || echo "0.1.0")
+# Read version from Cargo.toml (single source of truth)
+VERSION := $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
 IMAGE_NAME := l3objectstorage
 REGISTRY_IMAGE := gandalfsievers/l3objectstorage
 TEST_PORT := 9999
 TEST_COMPOSE := docker compose -f docker/docker-compose.test.yml
 TEST_COMPOSE_VHOST := $(TEST_COMPOSE) -f docker/docker-compose.test.vhost.yml
+TEST_COMPOSE_AWSSTYLE := $(TEST_COMPOSE) -f docker/docker-compose.test.awsstyle.yml
 
 # Detect host architecture
 HOST_ARCH := $(shell uname -m)
@@ -46,6 +47,7 @@ help:
 	@echo "    make test-integration-concurrency - Run concurrency tests"
 	@echo "    make test-integration-notifications - Run notification trigger tests"
 	@echo "    make test-integration-vhost - Run virtual hosted-style tests (in Docker)"
+	@echo "    make test-integration-awsstyle - Run AWS-style vhost tests (in Docker)"
 	@echo "    make test-mock             - Run mock/offline tests (no server)"
 	@echo "    make test-all              - Run all tests (unit + integration)"
 	@echo ""
@@ -195,6 +197,7 @@ docker-up-alpine:
 	S3_IMAGE=$(IMAGE_NAME):alpine $(TEST_COMPOSE) up -d
 
 docker-down:
+	-$(TEST_COMPOSE_AWSSTYLE) down --remove-orphans 2>/dev/null
 	-$(TEST_COMPOSE_VHOST) down --remove-orphans 2>/dev/null
 	-$(TEST_COMPOSE) down --remove-orphans 2>/dev/null
 
@@ -221,7 +224,7 @@ test-integration: docker-build-debian docker-up wait-ready
 	@echo "  PATH-STYLE integration tests"
 	@echo "=========================================="
 	@exit_code=0; \
-	cargo test --test aws_sdk_tests -- --ignored --nocapture --skip virtual_host --skip notification_trigger || exit_code=$$?; \
+	cargo test --test aws_sdk_tests -- --ignored --nocapture --skip virtual_host --skip virtual_host_aws --skip notification_trigger || exit_code=$$?; \
 	echo "Running notification trigger tests (single-threaded)..."; \
 	cargo test --test aws_sdk_tests notification_trigger -- --ignored --nocapture --test-threads=1 || exit_code=$$?; \
 	$(MAKE) docker-down; \
@@ -233,12 +236,13 @@ test-integration-noauth: docker-build-debian docker-up-noauth wait-ready
 	cargo test --test aws_sdk_tests --features noauth_tests -- --ignored --nocapture
 	@$(MAKE) docker-down
 
-# All tests (unit + path-style integration with notifications + vhost integration)
+# All tests (unit + path-style integration with notifications + vhost + awsstyle)
 test-all:
 	@exit_code=0; \
 	$(MAKE) test-unit || exit_code=$$?; \
 	$(MAKE) test-integration || exit_code=$$?; \
 	$(MAKE) test-integration-vhost || exit_code=$$?; \
+	$(MAKE) test-integration-awsstyle || exit_code=$$?; \
 	exit $$exit_code
 
 # Quick integration tests (skip stress and concurrency)
@@ -267,7 +271,19 @@ test-integration-vhost: docker-build-debian docker-up wait-ready
 	@echo "=========================================="
 	@exit_code=0; \
 	$(TEST_COMPOSE_VHOST) run --rm test-runner \
-		cargo test --test aws_sdk_tests -- --ignored --nocapture --skip notification_trigger --skip virtual_host || exit_code=$$?; \
+		cargo test --test aws_sdk_tests -- --ignored --nocapture --skip notification_trigger --skip virtual_host --skip virtual_host_aws || exit_code=$$?; \
+	$(MAKE) docker-down; \
+	exit $$exit_code
+
+# AWS-style virtual hosted tests (<bucket>.s3.<region>.amazonaws.com, runs inside Docker network)
+# Runs the full suite (including notifications) with AWS-style addressing
+test-integration-awsstyle: docker-build-debian docker-up wait-ready
+	@echo "=========================================="
+	@echo "  AWS-STYLE VIRTUAL HOSTED integration tests"
+	@echo "=========================================="
+	@exit_code=0; \
+	$(TEST_COMPOSE_AWSSTYLE) run --rm test-runner \
+		cargo test --test aws_sdk_tests -- --ignored --nocapture --skip virtual_host --test-threads=1 || exit_code=$$?; \
 	$(MAKE) docker-down; \
 	exit $$exit_code
 

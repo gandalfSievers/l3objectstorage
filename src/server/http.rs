@@ -276,23 +276,24 @@ async fn handle_request(
 
     tracing::debug!("{} {}", method, path);
 
-    // Try virtual hosted-style: extract bucket from Host header if domain is configured
-    let vhost_bucket = host_header
-        .as_deref()
-        .and_then(|host| {
-            config
-                .domain
-                .as_deref()
-                .and_then(|domain| extract_bucket_from_host(host, domain))
-        })
-        .map(String::from);
+    // Try virtual hosted-style: extract bucket from Host header
+    // AWS-style (<bucket>.s3.<region>.amazonaws.com) is always attempted;
+    // custom domain matching requires config.domain to be set.
+    let vhost_info = host_header.as_deref().and_then(|host| {
+        let domain = config.domain.as_deref().unwrap_or("");
+        extract_bucket_from_host(host, domain)
+    });
+
+    let vhost_bucket = vhost_info.as_ref().map(|info| info.bucket.to_owned());
+    let vhost_region = vhost_info.as_ref().and_then(|info| info.region.map(String::from));
 
     // Parse bucket and key from path or use virtual hosted-style bucket
     let (bucket, key) = if let Some(ref vhost_bucket) = vhost_bucket {
         // Virtual hosted-style: bucket from Host, entire path is the key
         tracing::debug!(
-            "Virtual hosted-style request: bucket={}, host={:?}",
+            "Virtual hosted-style request: bucket={}, region={:?}, host={:?}",
             vhost_bucket,
+            vhost_region,
             host_header
         );
         let key_path = path.trim_start_matches('/');
@@ -343,7 +344,13 @@ async fn handle_request(
         }
     }
 
-    let region = &config.region;
+    let region_owned;
+    let region = if let Some(ref r) = vhost_region {
+        region_owned = r.clone();
+        &region_owned
+    } else {
+        &config.region
+    };
 
     // Check for specific query params
     let has_uploads = query_params.contains_key("uploads");
@@ -896,20 +903,46 @@ async fn handle_request(
     }
 }
 
-/// Extract bucket from the Host header for virtual hosted-style requests.
+/// Result of virtual hosted-style host parsing.
+struct VirtualHostInfo<'a> {
+    bucket: &'a str,
+    region: Option<&'a str>,
+}
+
+/// Extract bucket (and optionally region) from the Host header for virtual hosted-style requests.
 ///
-/// Returns `Some(bucket_name)` if the Host matches `<bucket>.<domain>`,
-/// otherwise `None` (fall back to path-style).
-fn extract_bucket_from_host<'a>(host: &'a str, domain: &str) -> Option<&'a str> {
+/// Supports two formats (tried in order):
+/// 1. AWS-style: `<bucket>.s3.<region>.amazonaws.com`
+/// 2. Custom domain: `<bucket>.<domain>` (e.g., `mybucket.s3.local`)
+///
+/// AWS-style is tried first since it is more specific — a custom domain like
+/// `amazonaws.com` would otherwise swallow the region component.
+///
+/// Returns `None` if neither format matches (fall back to path-style).
+fn extract_bucket_from_host<'a>(host: &'a str, domain: &str) -> Option<VirtualHostInfo<'a>> {
     // Strip port from host if present (e.g., "mybucket.s3.local:9000" -> "mybucket.s3.local")
     let host_without_port = host.split(':').next().unwrap_or(host);
 
+    // Try AWS-style first: <bucket>.s3.<region>.amazonaws.com
+    if let Some(bucket_and_rest) = host_without_port.strip_suffix(".amazonaws.com") {
+        // bucket_and_rest is e.g. "mybucket.s3.us-east-1"
+        if let Some(dot_s3_pos) = bucket_and_rest.find(".s3.") {
+            let bucket = &bucket_and_rest[..dot_s3_pos];
+            let region = &bucket_and_rest[dot_s3_pos + 4..]; // skip ".s3."
+            if !bucket.is_empty() && !region.is_empty() {
+                return Some(VirtualHostInfo { bucket, region: Some(region) });
+            }
+        }
+    }
+
+    // Fall back to custom domain: <bucket>.<domain>
     let suffix = format!(".{}", domain);
     if let Some(bucket) = host_without_port.strip_suffix(&suffix) {
         if !bucket.is_empty() {
-            return Some(bucket);
+            return Some(VirtualHostInfo { bucket, region: None });
         }
     }
+
     None
 }
 
@@ -1247,32 +1280,59 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_bucket_from_host_virtual_hosted() {
-        assert_eq!(
-            extract_bucket_from_host("mybucket.s3.local", "s3.local"),
-            Some("mybucket")
-        );
-        assert_eq!(
-            extract_bucket_from_host("mybucket.s3.local:9000", "s3.local"),
-            Some("mybucket")
-        );
-        assert_eq!(
-            extract_bucket_from_host("my-bucket.s3.local:9000", "s3.local"),
-            Some("my-bucket")
-        );
+    fn test_extract_bucket_from_host_custom_domain() {
+        let info = extract_bucket_from_host("mybucket.s3.local", "s3.local").unwrap();
+        assert_eq!(info.bucket, "mybucket");
+        assert_eq!(info.region, None);
+
+        let info = extract_bucket_from_host("mybucket.s3.local:9000", "s3.local").unwrap();
+        assert_eq!(info.bucket, "mybucket");
+        assert_eq!(info.region, None);
+
+        let info = extract_bucket_from_host("my-bucket.s3.local:9000", "s3.local").unwrap();
+        assert_eq!(info.bucket, "my-bucket");
+        assert_eq!(info.region, None);
+    }
+
+    #[test]
+    fn test_extract_bucket_from_host_aws_style() {
+        let info = extract_bucket_from_host("mybucket.s3.us-east-1.amazonaws.com", "").unwrap();
+        assert_eq!(info.bucket, "mybucket");
+        assert_eq!(info.region, Some("us-east-1"));
+
+        let info = extract_bucket_from_host("mybucket.s3.eu-west-1.amazonaws.com", "").unwrap();
+        assert_eq!(info.bucket, "mybucket");
+        assert_eq!(info.region, Some("eu-west-1"));
+
+        let info = extract_bucket_from_host("mybucket.s3.us-west-2.amazonaws.com:443", "").unwrap();
+        assert_eq!(info.bucket, "mybucket");
+        assert_eq!(info.region, Some("us-west-2"));
+
+        let info = extract_bucket_from_host("my-bucket.s3.ap-southeast-1.amazonaws.com", "s3.local").unwrap();
+        assert_eq!(info.bucket, "my-bucket");
+        assert_eq!(info.region, Some("ap-southeast-1"));
+    }
+
+    #[test]
+    fn test_extract_bucket_aws_style_takes_precedence() {
+        // AWS-style should match before custom domain even if domain is "amazonaws.com"
+        let info = extract_bucket_from_host("mybucket.s3.us-east-1.amazonaws.com", "amazonaws.com").unwrap();
+        assert_eq!(info.bucket, "mybucket");
+        assert_eq!(info.region, Some("us-east-1"));
     }
 
     #[test]
     fn test_extract_bucket_from_host_no_match() {
         // Host is the domain itself (no bucket prefix)
-        assert_eq!(extract_bucket_from_host("s3.local", "s3.local"), None);
-        assert_eq!(extract_bucket_from_host("s3.local:9000", "s3.local"), None);
+        assert!(extract_bucket_from_host("s3.local", "s3.local").is_none());
+        assert!(extract_bucket_from_host("s3.local:9000", "s3.local").is_none());
         // Host doesn't match domain at all
-        assert_eq!(
-            extract_bucket_from_host("localhost:9000", "s3.local"),
-            None
-        );
-        // No domain configured
-        assert_eq!(extract_bucket_from_host("mybucket.s3.local", "other.domain"), None);
+        assert!(extract_bucket_from_host("localhost:9000", "s3.local").is_none());
+        // No domain configured and not AWS-style
+        assert!(extract_bucket_from_host("mybucket.s3.local", "other.domain").is_none());
+        // AWS-style but missing region
+        assert!(extract_bucket_from_host("mybucket.s3.amazonaws.com", "").is_none());
+        // AWS-style but missing bucket
+        assert!(extract_bucket_from_host(".s3.us-east-1.amazonaws.com", "").is_none());
     }
 }

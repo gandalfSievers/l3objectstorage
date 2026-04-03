@@ -7,13 +7,16 @@
 use super::*;
 
 const SNS_TOPIC_ARN: &str = "arn:aws:sns:us-east-1:000000000000:test-topic";
-const SQS_ENDPOINT: &str = "http://localhost:9324";
+
+fn sqs_endpoint() -> String {
+    std::env::var("TEST_SQS_ENDPOINT").unwrap_or_else(|_| "http://localhost:9324".to_string())
+}
 
 /// Poll ElasticMQ for a message on the given queue, retrying up to `timeout_ms`.
 async fn poll_sqs_message(queue_name: &str, timeout_ms: u64) -> Option<String> {
     let url = format!(
         "{}/queue/{}?Action=ReceiveMessage&WaitTimeSeconds=0&MaxNumberOfMessages=1",
-        SQS_ENDPOINT, queue_name
+        &sqs_endpoint(), queue_name
     );
     let client = reqwest::Client::new();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
@@ -47,7 +50,7 @@ async fn poll_sqs_message(queue_name: &str, timeout_ms: u64) -> Option<String> {
 async fn purge_sqs_queue(queue_name: &str) {
     let url = format!(
         "{}/queue/{}?Action=PurgeQueue",
-        SQS_ENDPOINT, queue_name
+        &sqs_endpoint(), queue_name
     );
     let _ = reqwest::Client::new().get(&url).send().await;
 }
@@ -57,7 +60,9 @@ fn parse_s3_event(body: &str) -> serde_json::Value {
     serde_json::from_str(body).expect("Failed to parse S3 event JSON")
 }
 
-const SNS_ENDPOINT: &str = "http://localhost:9911";
+fn sns_endpoint() -> String {
+    std::env::var("TEST_SNS_ENDPOINT").unwrap_or_else(|_| "http://localhost:9911".to_string())
+}
 
 /// Ensure the test-topic exists in local-sns and has an SQS subscription
 /// that forwards (raw) to the `sns-forwarded` ElasticMQ queue.
@@ -67,7 +72,7 @@ async fn ensure_sns_topic_with_sqs_subscription() {
 
     // Create topic (idempotent)
     let resp = client
-        .post(format!("{}/", SNS_ENDPOINT))
+        .post(format!("{}/", &sns_endpoint()))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body("Action=CreateTopic&Name=test-topic")
         .send()
@@ -95,7 +100,7 @@ async fn ensure_sns_topic_with_sqs_subscription() {
         percent_encode(endpoint),
     );
     let resp = client
-        .post(format!("{}/", SNS_ENDPOINT))
+        .post(format!("{}/", &sns_endpoint()))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(subscribe_body)
         .send()
@@ -115,7 +120,7 @@ async fn ensure_sns_topic_with_sqs_subscription() {
             percent_encode(sub_arn),
         );
         let _ = client
-            .post(format!("{}/", SNS_ENDPOINT))
+            .post(format!("{}/", &sns_endpoint()))
             .header("Content-Type", "application/x-www-form-urlencoded")
             .body(attr_body)
             .send()
@@ -674,7 +679,7 @@ async fn notification_trigger_sns_chain_diagnostic() {
         percent_encode(message),
     );
     let resp = client
-        .post(format!("{}/", SNS_ENDPOINT))
+        .post(format!("{}/", &sns_endpoint()))
         .header("Content-Type", "application/x-www-form-urlencoded")
         .body(body)
         .send()

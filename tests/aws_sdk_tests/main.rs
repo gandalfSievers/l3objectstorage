@@ -14,17 +14,25 @@ pub use aws_sdk_s3::Client;
 pub use bytes::Bytes;
 
 pub async fn create_s3_client() -> Client {
-    let force_path_style = std::env::var("TEST_FORCE_PATH_STYLE")
-        .map(|v| v != "false" && v != "0")
-        .unwrap_or(true);
-
-    let endpoint = if force_path_style {
-        std::env::var("TEST_ENDPOINT_URL")
-            .unwrap_or_else(|_| "http://localhost:9999".to_string())
-    } else {
-        std::env::var("TEST_VHOST_ENDPOINT_URL")
-            .unwrap_or_else(|_| "http://s3.local:9000".to_string())
-    };
+    // Detect addressing style from environment:
+    // - TEST_AWSSTYLE_ENDPOINT_URL → AWS-style vhost (<bucket>.s3.<region>.amazonaws.com)
+    // - TEST_VHOST_ENDPOINT_URL + TEST_FORCE_PATH_STYLE=false → custom-domain vhost
+    // - Otherwise → path-style (default)
+    let (endpoint, force_path_style) =
+        if let Ok(url) = std::env::var("TEST_AWSSTYLE_ENDPOINT_URL") {
+            (url, false)
+        } else if std::env::var("TEST_FORCE_PATH_STYLE")
+            .map(|v| v == "false" || v == "0")
+            .unwrap_or(false)
+        {
+            let url = std::env::var("TEST_VHOST_ENDPOINT_URL")
+                .unwrap_or_else(|_| "http://s3.local:9000".to_string());
+            (url, false)
+        } else {
+            let url = std::env::var("TEST_ENDPOINT_URL")
+                .unwrap_or_else(|_| "http://localhost:9999".to_string());
+            (url, true)
+        };
 
     let config = aws_config::defaults(BehaviorVersion::latest())
         .endpoint_url(&endpoint)
@@ -81,3 +89,4 @@ mod protocol;
 mod performance;
 mod notification_trigger;
 mod virtual_host;
+mod virtual_host_aws;

@@ -1,6 +1,6 @@
 [package]
 name = "l3_object_storage"
-version = "0.1.0"
+version = "0.3.2"
 edition = "2021"
 description = "A local S3-compatible object storage server"
 license = "MIT"

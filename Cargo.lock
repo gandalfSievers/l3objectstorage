@@ -1452,7 +1452,7 @@ dependencies = [
 
 [[package]]
 name = "l3_object_storage"
-version = "0.1.0"
+version = "0.3.2"
 dependencies = [
  "aws-config",
  "aws-credential-types",

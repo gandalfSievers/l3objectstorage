@@ -21,7 +21,6 @@ services:
     depends_on:
       - sns
       - sqs
-      - dns
 
   sns:
     image: jameskbride/local-sns
@@ -44,18 +43,6 @@ services:
       - "9324:9324"
     volumes:
       - ./elasticmq.conf:/opt/elasticmq.conf
-
-  dns:
-    image: alpine
-    container_name: l3objectstorage-dns
-    networks:
-      testnet:
-        ipv4_address: 172.30.0.53
-    volumes:
-      - ./dnsmasq-vhost.conf:/etc/dnsmasq.conf
-    cap_add:
-      - NET_ADMIN
-    command: sh -c "apk add --no-cache dnsmasq && dnsmasq -k"
 
 networks:
   testnet:

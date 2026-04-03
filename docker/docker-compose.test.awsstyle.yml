@@ -1,12 +1,16 @@
 services:
-  dns-vhost:
+  s3:
+    environment:
+      - LOCAL_S3_DOMAIN=
+
+  dns-awsstyle:
     image: alpine
-    container_name: l3objectstorage-dns-vhost
+    container_name: l3objectstorage-dns-awsstyle
     networks:
       testnet:
-        ipv4_address: 172.30.0.53
+        ipv4_address: 172.30.0.54
     volumes:
-      - ./dnsmasq-vhost.conf:/etc/dnsmasq.conf
+      - ./dnsmasq-awsstyle.conf:/etc/dnsmasq.conf
     cap_add:
       - NET_ADMIN
     command: sh -c "apk add --no-cache dnsmasq && dnsmasq -k"
@@ -17,7 +21,7 @@ services:
     networks:
       testnet:
     dns:
-      - 172.30.0.53
+      - 172.30.0.54
     volumes:
       - ../:/workspace
       - l3-cargo-registry:/usr/local/cargo/registry
@@ -25,11 +29,12 @@ services:
     working_dir: /workspace
     environment:
       - TEST_ENDPOINT_URL=http://l3objectstorage-test:9000
-      - TEST_VHOST_ENDPOINT_URL=http://s3.local:9000
-      - TEST_FORCE_PATH_STYLE=false
+      - TEST_AWSSTYLE_ENDPOINT_URL=http://s3.us-east-1.amazonaws.com:9000
+      - TEST_SNS_ENDPOINT=http://sns:9911
+      - TEST_SQS_ENDPOINT=http://sqs:9324
     depends_on:
       - s3
-      - dns-vhost
+      - dns-awsstyle
 
 volumes:
   l3-cargo-registry:
